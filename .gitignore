@@ -1,0 +1,21 @@
+# backend
+backend/target/
+*.class
+# frontend
+frontend/node_modules/
+frontend/dist/
+*.log
+# ide
+.idea/
+.vscode/
+*.iml
+# data
+/uploads/
+.firecrawl/
+# run (start.ps1 生成的 PID/日志)
+backend/.run/
+frontend/.run/
+# 根目录开发截图(仅根层，不影响 frontend 资源)
+/*.png
+# 含真实凭据的本地脚本(生产 DB link 等)，绝不入库
+*.local.sql

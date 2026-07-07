@@ -1,0 +1,53 @@
+* { box-sizing: border-box; }
+html, body, #app { height: 100%; margin: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  background: #faf9f5;
+  color: #191915;
+}
+/* 业务页页头：衬线暖色，与工作台呼应 */
+.page-title {
+  font-family: Georgia, "Songti SC", "STSong", SimSun, serif;
+  font-size: 22px; font-weight: 500; letter-spacing: -0.01em;
+  margin: 2px 0 18px; color: #191915;
+}
+
+/* ===== Element Plus 全局主题：主色 → 赤陶橙（Anthropic 暖人文） ===== */
+:root {
+  --el-color-primary: #cc785c;
+  --el-color-primary-light-3: #dba18d;   /* hover */
+  --el-color-primary-light-5: #e6bcae;
+  --el-color-primary-light-7: #f0d7ce;
+  --el-color-primary-light-8: #f5e4de;
+  --el-color-primary-light-9: #faf2ef;   /* 选中/浅底 */
+  --el-color-primary-dark-2: #a3604a;    /* active */
+
+  /* 文字与边框收暖，去掉冷灰默认 */
+  --el-text-color-primary: #191915;
+  --el-text-color-regular: #4b483f;
+  --el-text-color-secondary: #6b675e;
+  --el-border-color: #e7e2d6;
+  --el-border-color-light: #ece8dd;
+  --el-border-color-lighter: #f1ede3;
+  --el-fill-color-light: #f6f3ec;
+  --el-fill-color-lighter: #faf8f2;
+
+  /* 圆角柔化（Anthropic 偏圆润） */
+  --el-border-radius-base: 7px;
+  --el-border-radius-small: 5px;
+
+  /* 表格暖化 */
+  --el-table-header-bg-color: #f6f3ec;
+  --el-table-header-text-color: #4b483f;
+  --el-table-row-hover-bg-color: #faf6ef;
+  --el-table-border-color: #ece8dd;
+  --el-table-text-color: #4b483f;
+}
+
+/* 卡片：柔和圆角 + 暖 hairline */
+.el-card { border-radius: 12px !important; border-color: var(--el-border-color) !important; }
+/* 表格：外框圆角 + 表头字重 */
+.el-table { border-radius: 10px; }
+.el-table th.el-table__cell { font-weight: 600; }
+/* 标签页激活下划线已走主色；分页/输入聚焦走主色，无需额外覆盖 */

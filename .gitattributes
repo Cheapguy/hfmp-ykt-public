@@ -1,0 +1,21 @@
+# 默认文本按 LF 归一(仓库内统一存 LF，避免多 Agent worktree 行尾churn)
+* text=auto eol=lf
+
+# Windows 脚本必须 CRLF（.bat 非 CRLF 会 9009；.ps1 需 CRLF）
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+# 二进制不做行尾转换
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.xlsx  binary
+*.xls   binary
+*.pptx  binary
+*.pdf   binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
