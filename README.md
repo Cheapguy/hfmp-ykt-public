@@ -83,9 +83,13 @@ npm run dev
 `MybatisMetaHandler` 自动填充、`JacksonConfig`(Long→String 防雪花精度丢失)、
 前端 `makeCrud` 工厂 + `CrudTable` 通用表格组件。
 
-## 待补（脚手架未实现，留接口位）
-- 附件上传/下载 — 预留 AttachmentController 接口位
-- Excel 导入/导出（补贴对象、花名册）— 预留 EasyExcel 接入位
-- 退款/退回/更正发放 的明细处理（YKT_BATCH 已留 refundAmount 等字段）
-- 项目额度按优先级实际扣减逻辑
-```
+## 功能状态（原「待补」清单均已落地）
+- ✅ 附件上传/下载：公告附件 + 项目政策文件附件（uuid 落盘防路径穿越，`/files/preview` 免登录下载）
+- ✅ Excel 导入/导出：花名册批量导入、报表/花名册/查询导出（EasyExcel）
+- ✅ 退款/退回/更正发放明细处理：更正发放重构闭环（含二次/三次发放，源明细标记防重复重构）
+- ✅ 项目额度挂接与扣减：银行代发逐笔标记成败、失败计退回金额（资金守恒：下达 = 已付 + 退回）
+- ✅ 县域数据隔离：`SYS_ROLE.DATA_SCOPE` + `DataScopeResolver`，读取面 + 写接口 `assertScope` 兜底全闭环
+- ✅ 安全硬化：菜单级授权拦截器（`HandlerMethod` 精确匹配）、登录失败锁定/渐进验证码、JWT 密钥启动校验、越权/IDOR `assertReadable` 兜底
+- ✅ 空库可重建：`db/schema.sql`（按活库 DDL 重建，含全部表/列）+ `db/seed.sql`（脱敏种子）
+
+> 仍属演示简化：项目编码在终审后按「区划 + 时间序列」模拟生成，生产环境由编码规则平台统一下发。
