@@ -54,6 +54,16 @@ public abstract class BaseCrudController<M extends BaseMapper<E>, E> {
      */
     protected void assertReadable(E entity) { }
 
+    /**
+     * 写入（改/删）越权兜底钩子：默认沿用读取校验（读得到即写得动）。
+     * 目的是让"默认不安全的基类写接口"变为默认安全——子类只要覆写了 assertReadable，
+     * 未覆写 update/delete 时也自动获得同等的写越权防护。
+     * 注：delete 传入库中现存实体（按归属校验可靠）；update 传入的是请求体实体，
+     *   若需按"库中原归属"判权（防传本县字段改别县 id），子类应直接覆写 update
+     *   （补贴对象/村组/批次/项目均已如此），基类无法从泛型 E 通用取主键再回查。
+     */
+    protected void assertWritable(E entity) { assertReadable(entity); }
+
     @PostMapping
     public R<?> create(@RequestBody E entity) {
         getMapper().insert(entity);
@@ -62,12 +72,15 @@ public abstract class BaseCrudController<M extends BaseMapper<E>, E> {
 
     @PutMapping
     public R<?> update(@RequestBody E entity) {
+        assertWritable(entity);
         getMapper().updateById(entity);
         return R.ok();
     }
 
     @DeleteMapping("/{id:\\d+}")
     public R<?> delete(@PathVariable Long id) {
+        E e = getMapper().selectById(id);
+        if (e != null) assertWritable(e);   // 现存实体按归属校验，防越权删除
         getMapper().deleteById(id);
         return R.ok();
     }

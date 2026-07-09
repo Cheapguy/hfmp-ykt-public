@@ -155,6 +155,8 @@ public class YktProjectController extends BaseCrudController<YktProjectMapper, Y
 
     @Override
     public R<?> update(@RequestBody YktProject p) {
+        if (p.getId() == null) throw new BizException("缺少项目 id");
+        assertProjectVisible(p.getId());   // 县域越权兜底：不能改别县项目（送审/审核等流转已各自校验，此处补普通编辑）
         validateShortName(p);
         validateLevel(p);
         mapper.updateById(p);

@@ -36,6 +36,20 @@ public class YktProjectPolicyController {
     private final YktProjectPolicyMapper linkMapper;
     private final YktProjectMapper projectMapper;
     private final YktPolicyMapper policyMapper;
+    private final com.bosi.ykt.security.DataScopeResolver dataScope;
+
+    /**
+     * 项目县域越权兜底：以列表同款 applyProject 规则再查一遍该 id，命中=可见。
+     * 政策(YktPolicy)无县域属性、系共享文档，故 candidates 不做县域过滤，只收束项目侧。
+     */
+    private void assertProjectVisible(Long projectId) {
+        if (projectId == null) throw new BizException("缺少项目");
+        QueryWrapper<YktProject> w = new QueryWrapper<>();
+        w.eq("ID", projectId);
+        dataScope.applyProject(w, "PROJECT_CODE");
+        Long n = projectMapper.selectCount(w);
+        if (n == null || n == 0) throw new BizException("无权操作该项目（非本县数据）");
+    }
 
     /** 项目树数据源：已纳入项目（id/编码/名称/主管部门） */
     @GetMapping("/projects")
@@ -45,6 +59,7 @@ public class YktProjectPolicyController {
         if (tid != null) w.eq("TENANT_ID", tid);
         w.eq("INCLUDED", 1);
         if (projectName != null && !projectName.isBlank()) w.like("PROJECT_NAME", projectName.trim());
+        dataScope.applyProject(w, "PROJECT_CODE");   // 县域隔离：左侧项目树只列本县可见项目
         w.orderByAsc("PROJECT_CODE").orderByDesc("ID");
         return R.ok(projectMapper.selectList(w));
     }
@@ -52,7 +67,7 @@ public class YktProjectPolicyController {
     /** 某项目已关联的政策 */
     @GetMapping("/linked")
     public R<List<YktPolicy>> linked(@RequestParam Long projectId) {
-        if (projectId == null) throw new BizException("缺少项目");
+        assertProjectVisible(projectId);   // 县域越权兜底：不能查别县项目的关联政策
         List<Long> policyIds = linkedPolicyIds(projectId);
         if (policyIds.isEmpty()) return R.ok(List.of());
         // selectBatchIds 自动按 @TableLogic 过滤已删政策；保持按 ID 倒序
@@ -88,6 +103,7 @@ public class YktProjectPolicyController {
     public R<?> link(@RequestBody LinkReq req) {
         if (req == null || req.getProjectId() == null) throw new BizException("缺少项目");
         if (req.getPolicyIds() == null || req.getPolicyIds().isEmpty()) throw new BizException("请勾选要关联的政策");
+        assertProjectVisible(req.getProjectId());   // 县域越权兜底：不能给别县项目挂政策
         List<Long> existed = linkedPolicyIds(req.getProjectId());
         Long tid = UserContext.currentTenantId();
         Long uid = UserContext.currentUserId();
@@ -112,6 +128,7 @@ public class YktProjectPolicyController {
     public R<?> unlink(@RequestBody LinkReq req) {
         if (req == null || req.getProjectId() == null) throw new BizException("缺少项目");
         if (req.getPolicyIds() == null || req.getPolicyIds().isEmpty()) throw new BizException("请勾选要取消关联的政策");
+        assertProjectVisible(req.getProjectId());   // 县域越权兜底：不能解绑别县项目的政策
         QueryWrapper<YktProjectPolicy> w = new QueryWrapper<>();
         w.eq("PROJECT_ID", req.getProjectId()).in("POLICY_ID", req.getPolicyIds());
         int n = linkMapper.delete(w);

@@ -79,8 +79,10 @@ public class DataScopeResolver {
 
     private Ctx resolve() {
         Long uid = UserContext.currentUserId();
-        SysUser u = uid == null ? null : userMapper.selectById(uid);
-        if (u == null) return Ctx.all();   // 无登录态的公开接口（health 等）不误锁；业务接口有认证拦截兜底
+        if (uid == null) return Ctx.all();   // 真匿名（health 等公开接口，无 JWT）不误锁；业务接口有认证拦截兜底
+        SysUser u = userMapper.selectById(uid);
+        // token 有效但用户已不存在（被删/停用清库）：不能回落 ALL（否则已删账号的未过期 token 可读全州），最窄拒止
+        if (u == null) return Ctx.deny();
         if ("SYS_ADMIN".equals(u.getUserType())) return Ctx.all();
 
         Scope s = widestScope(uid);

@@ -6,6 +6,7 @@ import com.bosi.ykt.entity.YktAgency;
 import com.bosi.ykt.entity.YktVillage;
 import com.bosi.ykt.mapper.YktAgencyMapper;
 import com.bosi.ykt.mapper.YktVillageMapper;
+import com.bosi.ykt.security.DataScopeResolver;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
@@ -19,6 +20,7 @@ public class YktAgencyController {
 
     private final YktAgencyMapper mapper;
     private final YktVillageMapper villageMapper;
+    private final com.bosi.ykt.security.DataScopeResolver dataScope;
 
     /** 列表（可按名称/编码模糊；onlySubsidy=1 只取补贴单位如乡镇政府；county 按县市过滤，不传=全部供 admin） */
     @GetMapping("/list")
@@ -30,7 +32,13 @@ public class YktAgencyController {
                 .eq(YktAgency::getStatus, 1);
         if ("1".equals(onlySubsidy)) w.eq(YktAgency::getIsSubsidy, "1");
         if (level != null) w.eq(YktAgency::getLevelNo, level);
-        if (county != null && !county.isBlank()) w.eq(YktAgency::getCountyCode, county.trim());
+        // 县域隔离：非管理员强制本县（忽略入参 county，防枚举全州机构字典）；admin(ALL) 按入参可选过滤
+        DataScopeResolver.Ctx c = dataScope.current();
+        if (c.scope != DataScopeResolver.Scope.ALL) {
+            w.eq(YktAgency::getCountyCode, c.countyCode);
+        } else if (county != null && !county.isBlank()) {
+            w.eq(YktAgency::getCountyCode, county.trim());
+        }
         if (keyword != null && !keyword.isBlank())
             w.and(x -> x.like(YktAgency::getName, keyword.trim()).or().like(YktAgency::getCode, keyword.trim()));
         w.orderByAsc(YktAgency::getOrderNum).orderByAsc(YktAgency::getCode);
@@ -46,6 +54,9 @@ public class YktAgencyController {
     public R<List<Map<String, Object>>> villages(@RequestParam(required = false) Long townId) {
         List<Map<String, Object>> out = new ArrayList<>();
         if (townId == null) return R.ok(out);
+        // 县域越权兜底：只能取本人可见乡镇的村组（allowedTowns=null 即 ALL 放行）
+        Set<Long> allowed = dataScope.allowedTowns();
+        if (allowed != null && !allowed.contains(townId)) return R.ok(out);
         List<YktVillage> vs = villageMapper.selectList(new LambdaQueryWrapper<YktVillage>()
                 .eq(YktVillage::getTownId, townId)
                 .orderByAsc(YktVillage::getVillageCode));
@@ -61,8 +72,12 @@ public class YktAgencyController {
     /** 树（按 superGuid 组装；前端可用 el-tree-select / el-cascader） */
     @GetMapping("/tree")
     public R<List<Map<String, Object>>> tree() {
-        List<YktAgency> all = mapper.selectList(new LambdaQueryWrapper<YktAgency>().eq(YktAgency::getStatus, 1)
-                .orderByAsc(YktAgency::getOrderNum).orderByAsc(YktAgency::getCode));
+        // 县域隔离：非管理员只组本县机构树（防越权拿全州机构结构）
+        DataScopeResolver.Ctx c = dataScope.current();
+        LambdaQueryWrapper<YktAgency> tw = new LambdaQueryWrapper<YktAgency>().eq(YktAgency::getStatus, 1)
+                .eq(c.scope != DataScopeResolver.Scope.ALL, YktAgency::getCountyCode, c.countyCode)
+                .orderByAsc(YktAgency::getOrderNum).orderByAsc(YktAgency::getCode);
+        List<YktAgency> all = mapper.selectList(tw);
         Map<String, Map<String, Object>> node = new LinkedHashMap<>();
         for (YktAgency a : all) {
             Map<String, Object> m = new LinkedHashMap<>();
