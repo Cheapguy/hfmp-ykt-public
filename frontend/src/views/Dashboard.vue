@@ -2,7 +2,7 @@
   <div class="dash">
     <!-- 页头 -->
     <header class="dash-head">
-      <p class="eyebrow">惠民惠农财政补贴 · 一卡通</p>
+      <p class="eyebrow">甘肃省惠民惠农财政补贴 · 一卡通</p>
       <h1>工作台</h1>
       <p class="lede">补贴发放全流程一站式管理 —— 从批次下达到确认发放，让每一笔惠民资金可追溯、可核对。</p>
       <span class="date">{{ today }}</span>

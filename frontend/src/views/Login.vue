@@ -6,7 +6,7 @@
     <div class="login-card">
       <div class="login-head">
         <div class="logo-mark">惠</div>
-        <h1>惠民惠农财政补贴"一卡通"管理模块</h1>
+        <h1>甘肃省惠民惠农财政补贴"一卡通"管理模块</h1>
         <p>预算管理一体化 · 2026</p>
       </div>
 
@@ -34,7 +34,7 @@
         <div class="login-tip">默认账号 admin / admin123</div>
       </el-form>
     </div>
-    <div class="login-footer">© 一卡通管理模块 · 脚手架 Demo</div>
+    <div class="login-footer">© 甘肃省惠民惠农财政补贴"一卡通"管理模块</div>
   </div>
 </template>
 

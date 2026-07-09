@@ -4,7 +4,7 @@
     <el-header class="app-header" height="56px">
       <div class="brand">
         <div class="logo-mark">惠</div>
-        <div class="brand-text">惠民惠农财政补贴"一卡通"管理模块</div>
+        <div class="brand-text">甘肃省惠民惠农财政补贴"一卡通"管理模块</div>
       </div>
       <div class="header-warn">本系统为非涉密平台，严禁处理、传输国家秘密</div>
       <div class="header-right">
