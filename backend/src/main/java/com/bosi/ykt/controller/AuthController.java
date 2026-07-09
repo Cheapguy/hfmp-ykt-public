@@ -36,12 +36,23 @@ public class AuthController {
     private final SysUserRoleMapper userRoleMapper;
     private final SysRoleMenuMapper roleMenuMapper;
     private final JwtUtil jwtUtil;
+    private final com.bosi.ykt.security.LoginGuard loginGuard;
+
+    /** 时序均衡用的假 bcrypt 串：账号不存在也照样跑一次校验，防以响应耗时枚举账号 */
+    private static final String DUMMY_HASH = BCrypt.hashpw("timing-equalizer", BCrypt.gensalt());
 
     @Data
     public static class LoginReq {
         private String username;
         private String password;
         private String captcha;
+        private String captchaKey;
+    }
+
+    /** 图形验证码（渐进式：登录连续失败 2 次后要求）。返回 {key, img} */
+    @GetMapping("/captcha")
+    public R<Map<String, String>> captcha() {
+        return R.ok(loginGuard.newCaptcha());
     }
 
     @PostMapping("/login")
@@ -49,12 +60,29 @@ public class AuthController {
         if (req.getUsername() == null || req.getPassword() == null) {
             throw new BizException("请输入账号密码");
         }
+        String uname = req.getUsername().trim();
+        loginGuard.checkLock(uname);                          // 连续失败 5 次锁 10 分钟
+        if (loginGuard.captchaRequired(uname)) {              // 连续失败 2 次起要验证码
+            if (req.getCaptchaKey() == null || req.getCaptcha() == null || req.getCaptcha().isBlank())
+                throw new BizException(com.bosi.ykt.security.LoginGuard.CODE_CAPTCHA_REQUIRED, "请输入验证码");
+            if (!loginGuard.verifyCaptcha(req.getCaptchaKey(), req.getCaptcha())) {
+                loginGuard.onFail(uname);   // 验证码错也计失败：防验证码爆破，且失败计数不会卡在阈值下
+                throw new BizException(com.bosi.ykt.security.LoginGuard.CODE_CAPTCHA_REQUIRED, "验证码错误或已过期");
+            }
+        }
+
         SysUser u = userMapper.selectOne(
-                new LambdaQueryWrapper<SysUser>().eq(SysUser::getUsername, req.getUsername()).last("AND ROWNUM=1")
+                new LambdaQueryWrapper<SysUser>().eq(SysUser::getUsername, uname).last("AND ROWNUM=1")
         );
-        if (u == null) throw new BizException("账号不存在");
+        boolean ok = u != null && passwordMatches(req.getPassword(), u.getPassword());
+        if (u == null) passwordMatches(req.getPassword(), DUMMY_HASH);   // 时序均衡
+        if (!ok) {
+            // 统一文案：不区分「账号不存在/密码错误」，防账号枚举
+            loginGuard.onFail(uname);
+            throw new BizException("用户名或密码错误");
+        }
         if (u.getStatus() != null && u.getStatus() == 0) throw new BizException("账号已禁用");
-        if (!passwordMatches(req.getPassword(), u.getPassword())) throw new BizException("密码错误");
+        loginGuard.onSuccess(uname);
 
         u.setLastLoginAt(LocalDateTime.now());
         userMapper.updateById(u);
@@ -86,10 +114,10 @@ public class AuthController {
 
     @GetMapping("/menus")
     public R<List<SysMenu>> menus() {
+        // 不再按 visible 过滤：隐藏菜单(如 403 /roster/edit)与 F 按钮权限也要下发，
+        // 供前端路由守卫/按钮级权限判定；侧边栏渲染由前端按 visible=1 且非 F 过滤
         List<SysMenu> all = menuMapper.selectList(
-                new LambdaQueryWrapper<SysMenu>()
-                        .eq(SysMenu::getVisible, 1)
-                        .orderByAsc(SysMenu::getSortNo)
+                new LambdaQueryWrapper<SysMenu>().orderByAsc(SysMenu::getSortNo)
         );
 
         Long uid = UserContext.currentUserId();

@@ -7,7 +7,7 @@ import com.bosi.ykt.common.BaseEntity;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 
-/** 村组维护（系统管理）。村组编码及名称必须标准化 */
+/** 村组维护（系统管理）。手册 §六：村组编码及名称必须标准化 */
 @Data
 @EqualsAndHashCode(callSuper = true)
 @TableName("YKT_VILLAGE")

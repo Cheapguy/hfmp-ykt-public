@@ -39,7 +39,7 @@ public interface YktGrantDetailMapper extends BaseMapper<YktGrantDetail> {
      * 惠民系统使用情况：按 年度+部门 统计 项目/批次/乡镇/村组/户主/享受人 个数 + 发放金额。
      * 数据源 payStatus=已支付，可按发放日期范围与部门过滤。
      */
-    @Select("SELECT TO_CHAR(b.GRANT_TIME,'YYYY') AS yr, p.COMPETENT_DEPT AS dept, "
+    @Select("<script>SELECT TO_CHAR(b.GRANT_TIME,'YYYY') AS yr, p.COMPETENT_DEPT AS dept, "
             + "COUNT(DISTINCT b.PROJECT_ID) AS projectCnt, COUNT(DISTINCT b.ID) AS batchCnt, "
             + "COUNT(DISTINCT b.TOWN_ID) AS townCnt, COUNT(DISTINCT d.VILLAGE_NAME) AS villageCnt, "
             + "COUNT(DISTINCT d.HOLDER_ID_CARD) AS holderCnt, COUNT(d.ID) AS beneficiaryCnt, "
@@ -47,13 +47,17 @@ public interface YktGrantDetailMapper extends BaseMapper<YktGrantDetail> {
             + "FROM YKT_BATCH b JOIN YKT_GRANT_DETAIL d ON d.BATCH_ID = b.ID JOIN YKT_PROJECT p ON b.PROJECT_ID = p.ID "
             + "WHERE d.PAY_STATUS = '已支付' AND d.DELETED = 0 AND b.DELETED = 0 AND p.DELETED = 0 "
             + "AND (#{tid} IS NULL OR b.TENANT_ID = #{tid}) "
-            + "AND (#{startDate} IS NULL OR b.GRANT_TIME >= TO_DATE(#{startDate},'YYYY-MM-DD')) "
-            + "AND (#{endDate} IS NULL OR b.GRANT_TIME < TO_DATE(#{endDate},'YYYY-MM-DD') + 1) "
+            + "AND (#{startDate} IS NULL OR b.GRANT_TIME &gt;= TO_DATE(#{startDate},'YYYY-MM-DD')) "
+            + "AND (#{endDate} IS NULL OR b.GRANT_TIME &lt; TO_DATE(#{endDate},'YYYY-MM-DD') + 1) "
             + "AND (#{competentDept} IS NULL OR p.COMPETENT_DEPT = #{competentDept}) "
+            // 县域隔离：null=不限（ALL）；空集在调用侧兜为 [-1]（零结果）
+            + "<if test='townIds != null'> AND b.TOWN_ID IN "
+            + "<foreach item='t' collection='townIds' open='(' separator=',' close=')'>#{t}</foreach></if> "
             + "GROUP BY TO_CHAR(b.GRANT_TIME,'YYYY'), p.COMPETENT_DEPT "
-            + "ORDER BY yr DESC")
+            + "ORDER BY yr DESC</script>")
     List<Map<String, Object>> reportUsage(@Param("tid") Long tid,
                                           @Param("startDate") String startDate,
                                           @Param("endDate") String endDate,
-                                          @Param("competentDept") String competentDept);
+                                          @Param("competentDept") String competentDept,
+                                          @Param("townIds") List<Long> townIds);
 }

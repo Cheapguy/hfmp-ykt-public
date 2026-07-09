@@ -32,4 +32,10 @@ public class SysUser extends BaseEntity {
     /** 角色 ID 列表：仅用于 create / update / detail 时与前端往返；不持久化到 SYS_USER 表 */
     @TableField(exist = false)
     private List<Long> roleIds;
+
+    /** 列表页富化展示：所属机构名 / 角色名（顿号分隔），不持久化 */
+    @TableField(exist = false)
+    private String orgName;
+    @TableField(exist = false)
+    private String roleNames;
 }

@@ -19,11 +19,11 @@
 
     <el-card shadow="never">
       <el-tabs v-model="tab" @tab-change="onTab">
-        <el-tab-pane label="甘肃项目" name="gansu" />
+        <el-tab-pane label="本省项目" name="gansu" />
         <el-tab-pane label="中央项目" name="central" />
       </el-tabs>
 
-      <!-- 甘肃项目（本省 / 本级及管辖区划） -->
+      <!-- 本省项目（本省 / 本级及管辖区划） -->
       <template v-if="tab === 'gansu'">
         <el-table v-loading="loading" :data="rows" border stripe size="default">
           <el-table-column type="index" label="序号" width="60" align="center" />

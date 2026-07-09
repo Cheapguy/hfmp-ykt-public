@@ -128,7 +128,7 @@ async function doSend() {
   if (!selected.value.length) { ElMessage.warning('请先勾选批次'); return }
   const bad = selected.value.filter(r => r.status !== 'SUBMITTED')
   if (bad.length) { ElMessage.warning('仅未发送（终审）批次可发送一体化'); return }
-  await ElMessageBox.confirm(`确定将选中的 ${selected.value.length} 个批次发送至上级系统？`, '批次发送', { type: 'warning' })
+  await ElMessageBox.confirm(`确定将选中的 ${selected.value.length} 个批次发送至预算一体化？`, '批次发送', { type: 'warning' })
   for (const r of selected.value) await batchApi.send(r.id)
   ElMessage.success('已发送一体化'); reload()
 }

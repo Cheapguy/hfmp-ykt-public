@@ -60,9 +60,17 @@
           <el-input v-model="form.policyDocNo" maxlength="100" />
         </el-form-item></el-col>
         <el-col :span="24"><el-form-item label="政策文件" prop="policyFile">
-          <el-input v-model="form.policyFile" placeholder="填写政策文件名称（附件上传下一轮接入）">
-            <template #append><el-button disabled>上传新附件</el-button></template>
-          </el-input>
+          <div class="policy-file">
+            <template v-if="form.policyFile">
+              <a v-if="policyFileUrl" :href="policyFileUrl" target="_blank" class="file-link">{{ policyFileName }}</a>
+              <span v-else class="file-plain">{{ form.policyFile }}</span>
+              <el-button link type="danger" @click="form.policyFile = ''">移除</el-button>
+            </template>
+            <el-upload :show-file-list="false" :auto-upload="false" :on-change="onPolicyFilePick"
+                       accept=".pdf,.doc,.docx,.wps,.png,.jpg,.jpeg,.ofd">
+              <el-button :loading="uploadingFile">{{ form.policyFile ? '重新上传' : '上传附件' }}</el-button>
+            </el-upload>
+          </div>
           <div class="tip">本系统为非涉密平台，严禁传输国家秘密，请确保扫描、上传的文件资料不涉及国家秘密</div>
         </el-form-item></el-col>
         <el-col :span="24"><el-form-item label="补贴标准" prop="subsidyStandard">
@@ -120,6 +128,27 @@ function onPolicyChange() {
   if (!projectLevelOptions.value.includes(form.projectLevel)) form.projectLevel = ''
 }
 
+// ===== 政策文件附件：policyFile 存 /files/preview 下载地址；旧数据可能是纯文本文件名 =====
+const uploadingFile = ref(false)
+const policyFileUrl = computed(() =>
+  form.policyFile && form.policyFile.startsWith('/hfmp-ykt/api/files/preview/') ? form.policyFile : '')
+const policyFileName = computed(() => {
+  const m = /[?&]fn=([^&]+)/.exec(form.policyFile || '')
+  try { return m ? decodeURIComponent(m[1]) : '政策文件附件' } catch { return '政策文件附件' }
+})
+async function onPolicyFilePick(file) {
+  if (!file || !file.raw) return
+  if (file.raw.size > 20 * 1024 * 1024) return ElMessage.warning('附件不能超过 20MB')
+  const fd = new FormData()
+  fd.append('file', file.raw)
+  uploadingFile.value = true
+  try {
+    const d = await projectApi.upload(fd)
+    form.policyFile = d.url
+    ElMessage.success('附件上传成功')
+  } finally { uploadingFile.value = false }
+}
+
 watch(() => props.visible, v => {
   if (!v) return
   Object.assign(form, blank())
@@ -157,4 +186,8 @@ function onClosed() { formRef.value?.clearValidate?.() }
 <style scoped>
 .proj-form :deep(.el-form-item) { margin-bottom: 16px; }
 .tip { color: #f56c6c; font-size: 12px; line-height: 1.5; margin-top: 4px; }
+.policy-file { display: flex; align-items: center; gap: 12px; }
+.policy-file .file-link { color: var(--el-color-primary); text-decoration: none; }
+.policy-file .file-link:hover { text-decoration: underline; }
+.policy-file .file-plain { color: var(--el-text-color-regular); }
 </style>

@@ -1,9 +1,11 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
+import { ensurePerms, hasPath } from '../store/perm'
 
 const Login = () => import('../views/Login.vue')
 const Layout = () => import('../layout/index.vue')
 const Dashboard = () => import('../views/Dashboard.vue')
 const Placeholder = () => import('../views/Placeholder.vue')
+const Forbidden = () => import('../views/Forbidden.vue')
 
 // 发放数据审核
 const Audit = () => import('../views/audit/Audit.vue')
@@ -52,7 +54,8 @@ const routes = [
     component: Layout,
     redirect: '/dashboard',
     children: [
-      { path: 'dashboard', name: 'Dashboard', component: Dashboard, meta: { title: '工作台' } },
+      { path: 'dashboard', name: 'Dashboard', component: Dashboard, meta: { title: '工作台', public: true } },
+      { path: '403', name: 'Forbidden', component: Forbidden, meta: { title: '无权限', public: true } },
       { path: 'dept/audit/review', name: 'Audit', component: Audit, meta: { title: '发放数据审核' } },
       { path: 'sys/user', name: 'User', component: User, meta: { title: '用户管理' } },
       { path: 'sys/role', name: 'Role', component: Role, meta: { title: '角色管理' } },
@@ -95,11 +98,19 @@ const router = createRouter({
   routes
 })
 
-router.beforeEach((to, from, next) => {
+router.beforeEach(async (to) => {
+  if (to.meta.noAuth) return true
   const token = localStorage.getItem('ykt_token')
-  if (to.meta.noAuth) return next()
-  if (!token) return next({ path: '/login', query: { redirect: to.fullPath } })
-  next()
+  if (!token) return { path: '/login', query: { redirect: to.fullPath } }
+  // 公共页（工作台/403）与未实现占位页不做菜单校验
+  if (to.meta.public || to.name === 'Placeholder') return true
+  // 菜单拉取失败时不能 return true 放行——那会渲染受保护页面的外壳(fail-open)。
+  // 401 由 axios 拦截器兜底跳登录；其余错误回落到公共工作台，绝不带着未校验的权限进受保护页。
+  try { await ensurePerms() } catch (e) { return { path: '/dashboard' } }
+  // 页面级权限 = 用户菜单里有该 path（meta.perm 可显式指定所需菜单，供无独立菜单的子页继承）
+  const need = to.meta.perm ? [].concat(to.meta.perm) : [to.path]
+  if (need.some(p => hasPath(p))) return true
+  return { path: '/403', query: { from: to.fullPath } }
 })
 
 export default router

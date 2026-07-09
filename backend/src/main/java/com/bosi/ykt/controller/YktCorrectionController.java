@@ -18,7 +18,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.*;
 
 /**
- * 更正发放（主管部门）。
+ * 更正发放（主管部门）。手册 §十一(八)。
  *
  * 支付时出现卡号错误或需退款 → 数据被一体化置「已退款/已退回」。本界面列出这些数据，
  * 点【批次重构】按 项目+乡镇 生成新的「已下达」批次并把人员复制进去，由乡镇重新填报花名册送审。
@@ -44,35 +44,36 @@ public class YktCorrectionController {
                                              @RequestParam(required = false) Long townId) {
         Long tid = UserContext.currentTenantId();
 
-        // 先按 支付状态 捞退款/退回明细（小集合），再在 Java 侧按 项目/批次/乡镇 过滤，
-        // 避免反向以全部批次 ID 拼超长 IN（Oracle 上限 1000，ORA-01795）。
+        // 支付状态 + 项目/批次/乡镇/县域 全部下推 SQL（项目/乡镇用子查询，不拼超长 IN 防 ORA-01795），
+        // Java 侧只做富化；ROWNUM 兜底封顶防结果集失控（正常退款集远小于此）。
         QueryWrapper<YktGrantDetail> w = new QueryWrapper<>();
         if (tid != null) w.eq("TENANT_ID", tid);
-        w.in("PAY_STATUS", CORRECTABLE).orderByAsc("BATCH_ID", "SORT_NO");
+        w.in("PAY_STATUS", CORRECTABLE);
+        if (projectId != null) w.inSql("BATCH_ID", "SELECT ID FROM YKT_BATCH WHERE PROJECT_ID = " + projectId);
+        if (townId != null) w.inSql("BATCH_ID", "SELECT ID FROM YKT_BATCH WHERE TOWN_ID = " + townId);
+        String code = batchCode == null ? null : batchCode.trim();
+        if (code != null && !code.isEmpty()) w.like("BATCH_CODE", code);
+        dataScope.applyBatchTown(w, "BATCH_ID");        // 县域隔离下推 SQL
+        w.last("AND ROWNUM <= 5000 ORDER BY BATCH_ID, SORT_NO");
         List<YktGrantDetail> details = grantMapper.selectList(w);
         if (details.isEmpty()) return R.ok(Collections.emptyList());
 
         Map<Long, YktBatch> batchCache = new HashMap<>();
+        // 单位名按命中批次的乡镇 id 惰性查，不整表载入
         Map<Long, String> orgName = new HashMap<>();
-        orgMapper.selectList(null).forEach(o -> orgName.put(o.getId(), o.getOrgName()));
 
-        String code = batchCode == null ? null : batchCode.trim();
-        Set<Long> allowed = dataScope.allowedTowns();   // 县域隔离：null=全部
         List<Map<String, Object>> out = new ArrayList<>();
         for (YktGrantDetail d : details) {
             YktBatch b = batchCache.computeIfAbsent(d.getBatchId(), batchMapper::selectById);
             if (b == null) continue;
-            if (allowed != null && !allowed.contains(b.getTownId())) continue;
-            if (projectId != null && !projectId.equals(b.getProjectId())) continue;
-            if (townId != null && !townId.equals(b.getTownId())) continue;
-            if (code != null && !code.isEmpty() && (b.getBatchCode() == null || !b.getBatchCode().contains(code))) continue;
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("id", d.getId());
             m.put("beneficiaryName", d.getBeneficiaryName());
             m.put("bankAccount", d.getBankAccount());
             m.put("batchCode", d.getBatchCode());
-            m.put("batchName", b == null ? null : b.getBatchName());
-            m.put("townName", b == null ? null : orgName.get(b.getTownId()));
+            m.put("batchName", b.getBatchName());
+            m.put("townName", b.getTownId() == null ? null : orgName.computeIfAbsent(b.getTownId(),
+                    id -> { SysOrg o = orgMapper.selectById(id); return o == null ? null : o.getOrgName(); }));
             m.put("villageName", d.getVillageName());
             m.put("groupName", d.getGroupName());
             m.put("amount", d.getAmount());
@@ -107,6 +108,7 @@ public class YktCorrectionController {
             if (!CORRECTABLE.contains(d.getPayStatus())) continue;   // 只处理退款/退回
             YktBatch src = batchCache.computeIfAbsent(d.getBatchId(), batchMapper::selectById);
             if (src == null) continue;
+            assertScope(src);   // 县域越权兜底：源批次乡镇须在本人范围内（防直连传别县 detailId）
             String key = src.getProjectId() + "_" + src.getTownId();
             groups.computeIfAbsent(key, k -> new ArrayList<>()).add(d);
             groupSrcBatch.putIfAbsent(key, src);
@@ -178,6 +180,14 @@ public class YktCorrectionController {
     private String genBatchCode(int seq) {
         String ts = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMddHHmmssSSS"));
         return "6201020002" + ts + String.format("%02d", seq % 100);
+    }
+
+    /** 县域越权兜底：批次乡镇不在本人可见范围则拒（管理员/全部 allowedTowns=null 放行）。 */
+    private void assertScope(YktBatch b) {
+        Set<Long> towns = dataScope.allowedTowns();
+        if (towns == null) return;
+        if (b == null || b.getTownId() == null || !towns.contains(b.getTownId()))
+            throw new BizException("无权操作该批次（非本县数据）");
     }
 
     private void refreshBatchTotals(Long batchId) {

@@ -64,7 +64,8 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { UserFilled, CaretBottom, HomeFilled } from '@element-plus/icons-vue'
-import { fetchMenus, logout, changePassword } from '../api/auth'
+import { logout, changePassword } from '../api/auth'
+import { ensurePerms, resetPerms } from '../store/perm'
 import SidebarMenu from './SidebarMenu.vue'
 
 const router = useRouter()
@@ -74,14 +75,17 @@ const year = new Date().getFullYear()
 
 const userTypeLabel = computed(() => ({
   SYS_ADMIN: '系统管理员', TOWN_OP: '乡镇经办', TOWN_AUDIT: '乡镇审核',
-  DEPT_OP: '部门经办', DEPT_AUDIT: '部门审核'
+  DEPT_OP: '部门经办', DEPT_AUDIT: '部门审核', FINANCE: '财政'
 }[user.value.userType] || ''))
 
 const menuTree = computed(() => {
+  // /auth/menus 现在会带回隐藏菜单(visible=0)与 F 按钮权限行（供路由守卫/v-perm 用），
+  // 侧边栏只渲染可见的目录与菜单
+  const rows = menuFlat.value.filter(m => m.visible === 1 && m.menuType !== 'F')
   const map = {}
-  menuFlat.value.forEach(m => map[m.id] = { ...m, children: [] })
+  rows.forEach(m => map[m.id] = { ...m, children: [] })
   const tree = []
-  menuFlat.value.forEach(m => {
+  rows.forEach(m => {
     const pid = m.parentId
     if (pid && pid !== '0' && map[pid]) map[pid].children.push(map[m.id])
     else tree.push(map[m.id])
@@ -89,11 +93,16 @@ const menuTree = computed(() => {
   const sortFn = (a, b) => (a.sortNo || 0) - (b.sortNo || 0)
   const sortDeep = (nodes) => { nodes.sort(sortFn); nodes.forEach(n => { if (n.children?.length) sortDeep(n.children) }) }
   sortDeep(tree)
-  return tree
+  // 目录下子项全被过滤(如只剩隐藏菜单)时别留空组
+  const prune = (nodes) => nodes.filter(n => {
+    n.children = prune(n.children)
+    return n.menuType !== 'M' || n.children.length > 0
+  })
+  return prune(tree)
 })
 
 onMounted(async () => {
-  try { menuFlat.value = await fetchMenus() }
+  try { menuFlat.value = await ensurePerms() }   // 与路由守卫共享同一次拉取
   catch (e) { console.error('菜单加载失败', e) }
 })
 
@@ -102,6 +111,7 @@ async function onUserCmd(cmd) {
     await ElMessageBox.confirm('确定退出当前账号？', '提示', { type: 'warning' })
     try { await logout() } catch (e) {}
     localStorage.removeItem('ykt_token'); localStorage.removeItem('ykt_user')
+    resetPerms()
     router.replace('/login')
   } else if (cmd === 'changePwd') { pwdVisible.value = true }
 }
@@ -123,6 +133,7 @@ async function onPwdSubmit() {
     ElMessage.success('密码已修改，请重新登录')
     pwdVisible.value = false
     localStorage.removeItem('ykt_token')
+    resetPerms()
     router.replace('/login')
   } finally { pwdLoading.value = false }
 }

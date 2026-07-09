@@ -2,11 +2,14 @@ package com.bosi.ykt.controller;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.bosi.ykt.common.BaseCrudController;
+import com.bosi.ykt.common.BizException;
 import com.bosi.ykt.common.R;
 import com.bosi.ykt.entity.SysRole;
 import com.bosi.ykt.entity.SysRoleMenu;
+import com.bosi.ykt.entity.SysUserRole;
 import com.bosi.ykt.mapper.SysRoleMapper;
 import com.bosi.ykt.mapper.SysRoleMenuMapper;
+import com.bosi.ykt.mapper.SysUserRoleMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
@@ -20,6 +23,7 @@ public class SysRoleController extends BaseCrudController<SysRoleMapper, SysRole
 
     private final SysRoleMapper mapper;
     private final SysRoleMenuMapper roleMenuMapper;
+    private final SysUserRoleMapper userRoleMapper;
     @Override protected SysRoleMapper getMapper() { return mapper; }
 
     @GetMapping("/{id}/menu-ids")
@@ -44,6 +48,10 @@ public class SysRoleController extends BaseCrudController<SysRoleMapper, SysRole
 
     @Override
     public R<?> delete(@PathVariable Long id) {
+        Long bound = userRoleMapper.selectCount(
+                new LambdaQueryWrapper<SysUserRole>().eq(SysUserRole::getRoleId, id));
+        if (bound != null && bound > 0)
+            throw new BizException("该角色下仍有 " + bound + " 个用户，请先解绑再删除");
         roleMenuMapper.delete(new LambdaQueryWrapper<SysRoleMenu>().eq(SysRoleMenu::getRoleId, id));
         mapper.deleteById(id);
         return R.ok();

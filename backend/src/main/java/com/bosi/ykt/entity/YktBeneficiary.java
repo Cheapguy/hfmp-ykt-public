@@ -7,7 +7,7 @@ import com.bosi.ykt.common.BaseEntity;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 
-/** 补贴对象库（系统管理）。送审时按 姓名/身份证/社保卡/村组 校验 */
+/** 补贴对象库（系统管理）。手册 §八。送审时按 姓名/身份证/社保卡/村组 校验 */
 @Data
 @EqualsAndHashCode(callSuper = true)
 @TableName("YKT_BENEFICIARY")

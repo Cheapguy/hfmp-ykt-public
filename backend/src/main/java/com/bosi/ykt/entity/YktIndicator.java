@@ -9,7 +9,7 @@ import lombok.EqualsAndHashCode;
 
 import java.math.BigDecimal;
 
-/** 预算指标库。只有热点分类含"一卡通"的指标可挂接 */
+/** 预算指标库（预算管理一体化）。手册 §十二：只有热点分类含"一卡通"的指标可挂接 */
 @Data
 @EqualsAndHashCode(callSuper = true)
 @TableName("YKT_INDICATOR")

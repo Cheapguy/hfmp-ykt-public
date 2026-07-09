@@ -9,7 +9,7 @@ import lombok.EqualsAndHashCode;
 
 import java.math.BigDecimal;
 
-/** 支付申请-指标扣减明细。发起支付按使用规则逐指标预扣减额度，撤销时据此回滚 */
+/** 支付申请-指标扣减明细。手册 §十三：发起支付按使用规则逐指标预扣减额度，撤销时据此回滚 */
 @Data
 @EqualsAndHashCode(callSuper = true)
 @TableName("YKT_PAY_APPLY_DETAIL")

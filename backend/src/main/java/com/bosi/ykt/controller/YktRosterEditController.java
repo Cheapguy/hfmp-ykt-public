@@ -42,11 +42,13 @@ public class YktRosterEditController {
     /** 写审核流水（与发放数据审核共用一张 YKT_AUDIT_LOG，保证「查看」流程进度完整） */
     private void writeAuditLog(Long batchId, String doneStation, String opType, String opResult,
                               String opinion, String pendingStation) {
-        Long maxSeq = auditLogMapper.selectCount(new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<YktAuditLog>()
-                .eq(YktAuditLog::getBatchId, batchId));
+        // MAX+1 而非 count+1：流水一般不删，但口径统一防撞
+        List<Object> mx = auditLogMapper.selectObjs(new QueryWrapper<YktAuditLog>()
+                .select("NVL(MAX(SEQ_NO),0)").eq("BATCH_ID", batchId));
+        int maxSeq = mx.isEmpty() || mx.get(0) == null ? 0 : ((Number) mx.get(0)).intValue();
         YktAuditLog log = new YktAuditLog();
         log.setBatchId(batchId);
-        log.setSeqNo((maxSeq == null ? 0 : maxSeq.intValue()) + 1);
+        log.setSeqNo(maxSeq + 1);
         log.setDoneStation(doneStation);
         Long uid = UserContext.currentUserId();
         SysUser u = uid == null ? null : userMapper.selectById(uid);
@@ -66,6 +68,39 @@ public class YktRosterEditController {
         return w;
     }
 
+    /** 县域越权兜底：批次乡镇不在本人可见范围则拒（管理员/全部 allowedTowns=null 放行）。 */
+    private void assertScope(Long batchId) {
+        Set<Long> towns = dataScope.allowedTowns();
+        if (towns == null) return;
+        YktBatch b = batchId == null ? null : batchMapper.selectById(batchId);
+        if (b == null || b.getTownId() == null || !towns.contains(b.getTownId()))
+            throw new BizException("无权操作该批次（非本县数据）");
+    }
+
+    /** 按明细 id 兜底：解析其所属批次后校验（供 updateById/删除等按明细操作的接口用）。 */
+    private void assertDetailScope(Long detailId) {
+        if (detailId == null) return;
+        if (dataScope.allowedTowns() == null) return;
+        YktGrantDetail d = grantMapper.selectById(detailId);
+        if (d == null) throw new BizException("明细不存在");
+        assertScope(d.getBatchId());
+    }
+
+    /** 状态机守卫：仅已下达(ISSUED)批次可编辑花名册（送审后/发送后/支付后一律拒，防直连 API 改已入账批次）。 */
+    private void requireEditable(Long batchId) {
+        YktBatch b = batchId == null ? null : batchMapper.selectById(batchId);
+        if (b == null) throw new BizException("批次不存在");
+        if (!"ISSUED".equals(b.getStatus()))
+            throw new BizException("批次[" + b.getBatchName() + "]当前状态不可编辑花名册（仅已下达待编制批次可编辑）");
+    }
+
+    /** 明细级编辑守卫：由明细反查所属批次后走状态机守卫。 */
+    private void requireDetailEditable(Long detailId) {
+        YktGrantDetail d = detailId == null ? null : grantMapper.selectById(detailId);
+        if (d == null) throw new BizException("明细不存在");
+        requireEditable(d.getBatchId());
+    }
+
     /** 首页：待编制花名册列表（仅已下达 status=ISSUED；未下达批次不展示），带项目名 + 标签 */
     @GetMapping("/pending")
     public R<List<Map<String, Object>>> pending() {
@@ -78,10 +113,13 @@ public class YktRosterEditController {
                 .or(y -> y.eq("STATUS", "SUBMITTED").eq("AUDIT_STAGE", "TOWN_AUDIT")));
         w.orderByAsc("ID");
         dataScope.applyTown(w, "TOWN_ID");   // 县域隔离：乡镇只见本乡镇待编制批次
+        List<YktBatch> batches = batchMapper.selectList(w);
+        // 只查结果集涉及的项目名，不整表载入
         Map<Long, String> projName = new HashMap<>();
-        projectMapper.selectList(null).forEach(p -> projName.put(p.getId(), p.getProjectName()));
+        List<Long> pids = batches.stream().map(YktBatch::getProjectId).filter(Objects::nonNull).distinct().toList();
+        if (!pids.isEmpty()) projectMapper.selectBatchIds(pids).forEach(p -> projName.put(p.getId(), p.getProjectName()));
         List<Map<String, Object>> out = new ArrayList<>();
-        for (YktBatch b : batchMapper.selectList(w)) {
+        for (YktBatch b : batches) {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("id", b.getId());
             m.put("batchCode", b.getBatchCode());
@@ -98,6 +136,7 @@ public class YktRosterEditController {
     /** 编制界面表头：批次基本信息 */
     @GetMapping("/{batchId}/info")
     public R<Map<String, Object>> info(@PathVariable Long batchId) {
+        assertScope(batchId);
         YktBatch b = batchMapper.selectById(batchId);
         Map<String, Object> m = new LinkedHashMap<>();
         if (b != null) {
@@ -148,15 +187,17 @@ public class YktRosterEditController {
         Long t = tid();
         Map<Long, String> bankName = new HashMap<>();
         bankMapper.selectList(null).forEach(b -> bankName.put(b.getId(), b.getBankName()));
-        Map<Long, String> villageName = new HashMap<>();
-        villageMapper.selectList(null).forEach(v -> villageName.put(v.getId(), v.getVillageName()));
 
         List<Map<String, Object>> out = new ArrayList<>();
         if ("2".equals(source)) {
             // 历史发放数据：从已发放花名册去重取人
             QueryWrapper<YktGrantDetail> w = scope();
+            dataScope.applyBatchTown(w, "BATCH_ID");   // 县域隔离：历史发放候选只取本县
             if (beneficiaryName != null && !beneficiaryName.isBlank()) w.like("BENEFICIARY_NAME", beneficiaryName.trim());
-            if (villageId != null) w.eq("VILLAGE_NAME", villageName.get(villageId));
+            if (villageId != null) {
+                YktVillage v = villageMapper.selectById(villageId);
+                w.eq("VILLAGE_NAME", v == null ? null : v.getVillageName());
+            }
             w.last("and rownum <= 500");
             Set<String> seen = new HashSet<>();
             for (YktGrantDetail d : grantMapper.selectList(w)) {
@@ -184,8 +225,11 @@ public class YktRosterEditController {
             w.eq("STATUS", "1");
             if (villageId != null) w.eq("VILLAGE_ID", villageId);
             if (beneficiaryName != null && !beneficiaryName.isBlank()) w.like("NAME", beneficiaryName.trim());
+            dataScope.applyTown(w, "TOWN_ID");   // 县域隔离：候选只取本县补贴对象
             w.last("and rownum <= 500");
-            for (YktBeneficiary p : beneficiaryMapper.selectList(w)) {
+            List<YktBeneficiary> people = beneficiaryMapper.selectList(w);
+            Map<Long, String> villageName = villageNamesOf(people);
+            for (YktBeneficiary p : people) {
                 Map<String, Object> m = new LinkedHashMap<>();
                 m.put("holderName", p.getHeadName());
                 m.put("holderIdCard", p.getHeadIdCard());
@@ -210,6 +254,8 @@ public class YktRosterEditController {
     @SuppressWarnings("unchecked")
     public R<Integer> fillSave(@RequestBody Map<String, Object> body) {
         Long batchId = Long.valueOf(String.valueOf(body.get("batchId")));
+        assertScope(batchId);
+        requireEditable(batchId);
         List<Map<String, Object>> rows = (List<Map<String, Object>>) body.get("rows");
         if (rows == null || rows.isEmpty()) return R.ok(0);
         YktBatch batch = batchMapper.selectById(batchId);
@@ -249,12 +295,16 @@ public class YktRosterEditController {
     @PostMapping
     public R<Void> save(@RequestBody YktGrantDetail d) {
         if (d.getId() == null) {
+            assertScope(d.getBatchId());
+            requireEditable(d.getBatchId());
             d.setSortNo(nextSortNo(d.getBatchId()));
             YktBatch b = batchMapper.selectById(d.getBatchId());
             if (b != null) d.setBatchCode(b.getBatchCode());
             if (d.getPayStatus() == null) d.setPayStatus("已申请");
             grantMapper.insert(d);
         } else {
+            assertDetailScope(d.getId());
+            requireDetailEditable(d.getId());
             grantMapper.updateById(d);
         }
         return R.ok();
@@ -264,7 +314,7 @@ public class YktRosterEditController {
     @PostMapping("/batch-save")
     public R<Integer> batchSave(@RequestBody List<YktGrantDetail> list) {
         int n = 0;
-        for (YktGrantDetail d : list) if (d.getId() != null) n += grantMapper.updateById(d);
+        for (YktGrantDetail d : list) if (d.getId() != null) { assertDetailScope(d.getId()); requireDetailEditable(d.getId()); n += grantMapper.updateById(d); }
         return R.ok(n);
     }
 
@@ -273,6 +323,7 @@ public class YktRosterEditController {
     public R<Void> delete(@RequestParam String ids) {
         List<Long> idList = new ArrayList<>();
         for (String s : ids.split(",")) if (!s.isBlank()) idList.add(Long.valueOf(s.trim()));
+        for (Long id : idList) { assertDetailScope(id); requireDetailEditable(id); }   // 县域越权 + 状态机守卫
         if (!idList.isEmpty()) grantMapper.deleteBatchIds(idList);
         return R.ok();
     }
@@ -286,6 +337,8 @@ public class YktRosterEditController {
         BigDecimal standard = body.get("standard") == null ? null : new BigDecimal(String.valueOf(body.get("standard")));
         BigDecimal amount = body.get("amount") == null ? null : new BigDecimal(String.valueOf(body.get("amount")));
 
+        assertScope(batchId);
+        requireEditable(batchId);
         YktBatch batch = batchMapper.selectById(batchId);
         QueryWrapper<YktBeneficiary> bw = new QueryWrapper<>();
         Long t = tid();
@@ -293,12 +346,12 @@ public class YktRosterEditController {
         bw.eq("STATUS", "1");
         if (townId != null) bw.eq("TOWN_ID", townId);
         if (villageId != null) bw.eq("VILLAGE_ID", villageId);
+        dataScope.applyTown(bw, "TOWN_ID");   // 县域隔离：只从本县补贴对象库拉人（防传别县 townId）
         List<YktBeneficiary> people = beneficiaryMapper.selectList(bw);
 
         Map<Long, String> bankName = new HashMap<>();
         bankMapper.selectList(null).forEach(b -> bankName.put(b.getId(), b.getBankName()));
-        Map<Long, String> villageName = new HashMap<>();
-        villageMapper.selectList(null).forEach(v -> villageName.put(v.getId(), v.getVillageName()));
+        Map<Long, String> villageName = villageNamesOf(people);
 
         int seq = nextSortNo(batchId);
         int n = 0;
@@ -334,11 +387,14 @@ public class YktRosterEditController {
     /** 乡镇经办岗送审：补贴对象库一致性校验通过后 ISSUED -> SUBMITTED，进入乡镇审核岗(TOWN_AUDIT) */
     @PostMapping("/{batchId}/submit")
     public R<Void> submit(@PathVariable Long batchId) {
+        assertScope(batchId);
         validateForSubmit(batchId);          // 校验失败抛 BizException，停留花名册维护
         refreshBatchTotals(batchId);
-        YktBatch b = new YktBatch();
-        b.setId(batchId); b.setStatus("SUBMITTED"); b.setAuditStage("TOWN_AUDIT"); b.setLastResult("送审");
-        batchMapper.updateById(b);
+        // 条件更新：仅已下达(ISSUED)批次可送审，0 行=状态已变更（并发/越权直连）
+        int r = batchMapper.update(null, new com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper<YktBatch>()
+                .eq("ID", batchId).eq("STATUS", "ISSUED")
+                .set("STATUS", "SUBMITTED").set("AUDIT_STAGE", "TOWN_AUDIT").set("LAST_RESULT", "送审"));
+        if (r == 0) throw new BizException("仅已下达待编制的批次可送审（状态已变更，请刷新）");
         // 流程进度：乡镇录入 --送审--> 乡镇审核
         writeAuditLog(batchId, "乡镇录入", "审核", "送审", "", "乡镇审核");
         return R.ok();
@@ -354,14 +410,26 @@ public class YktRosterEditController {
         if (details.isEmpty()) throw new BizException("花名册为空，无法送审");
 
         Long t = tid();
-        QueryWrapper<YktBeneficiary> bw = new QueryWrapper<>();
-        if (t != null) bw.eq("TENANT_ID", t);
-        bw.eq("STATUS", "1");
+        // 只查本批次明细涉及的身份证（≤1000 一组分批 IN），不再把全州对象库载入内存
+        List<String> idcs = details.stream()
+                .map(YktGrantDetail::getBeneficiaryIdCard)
+                .filter(Objects::nonNull).map(String::trim).filter(s -> !s.isEmpty())
+                .distinct().toList();
         Map<String, YktBeneficiary> lib = new HashMap<>();
-        for (YktBeneficiary p : beneficiaryMapper.selectList(bw))
-            if (p.getIdCard() != null) lib.put(p.getIdCard().trim(), p);
+        for (int i = 0; i < idcs.size(); i += 1000) {
+            QueryWrapper<YktBeneficiary> bw = new QueryWrapper<>();
+            if (t != null) bw.eq("TENANT_ID", t);
+            bw.eq("STATUS", "1").in("ID_CARD", idcs.subList(i, Math.min(i + 1000, idcs.size())));
+            for (YktBeneficiary p : beneficiaryMapper.selectList(bw))
+                if (p.getIdCard() != null) lib.put(p.getIdCard().trim(), p);
+        }
+        // 村组名只查命中对象涉及的 id
         Map<Long, String> villageName = new HashMap<>();
-        villageMapper.selectList(null).forEach(v -> villageName.put(v.getId(), v.getVillageName()));
+        List<Long> vids = lib.values().stream().map(YktBeneficiary::getVillageId)
+                .filter(Objects::nonNull).distinct().toList();
+        for (int i = 0; i < vids.size(); i += 1000)
+            villageMapper.selectBatchIds(vids.subList(i, Math.min(i + 1000, vids.size())))
+                    .forEach(v -> villageName.put(v.getId(), v.getVillageName()));
 
         List<String> errs = new ArrayList<>();
         int row = 0;
@@ -391,12 +459,14 @@ public class YktRosterEditController {
             throw new BizException("送审校验未通过，请修正后再送审（前" + errs.size() + "条）：\n" + String.join("\n", errs));
     }
 
-    /** 取消送审：SUBMITTED -> ISSUED（回到已下达可编辑态，而非未下达） */
+    /** 取消送审：SUBMITTED+TOWN_AUDIT -> ISSUED（仅刚送审、还没被乡镇审核经手的批次可撤回） */
     @PostMapping("/{batchId}/unsubmit")
     public R<Void> unsubmit(@PathVariable Long batchId) {
-        YktBatch b = new YktBatch();
-        b.setId(batchId); b.setStatus("ISSUED"); b.setAuditStage("DRAFT"); b.setLastResult("待编制");
-        batchMapper.updateById(b);
+        assertScope(batchId);
+        int r = batchMapper.update(null, new com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper<YktBatch>()
+                .eq("ID", batchId).eq("STATUS", "SUBMITTED").eq("AUDIT_STAGE", "TOWN_AUDIT")
+                .set("STATUS", "ISSUED").set("AUDIT_STAGE", "DRAFT").set("LAST_RESULT", "待编制"));
+        if (r == 0) throw new BizException("仅刚送审（待乡镇审核）的批次可取消送审");
         return R.ok();
     }
 
@@ -419,6 +489,8 @@ public class YktRosterEditController {
         for (Long id : req.getDetailIds()) {
             YktGrantDetail d = grantMapper.selectById(id);
             if (d == null) continue;
+            assertScope(d.getBatchId());
+            requireStoppable(d.getBatchId());   // 状态机守卫：发起支付(PAID)之后不可再停发，防资金核算错位
             d.setPayStatus("已停发");
             d.setStopReason(req.getReason().trim());
             grantMapper.updateById(d);
@@ -428,12 +500,27 @@ public class YktRosterEditController {
         return R.ok(Map.of("count", n));
     }
 
-    /** 删除批次（连同花名册）；更正发放批次由系统重构生成，禁止删除 */
+    /**
+     * 停发守卫：批次进入支付环节(PAID/PAID_OUT)后不可再停发——
+     * 支付申请金额在 gen 时已按「排除已停发」冻结，之后再停发会让指标核算与实际错位。
+     */
+    private void requireStoppable(Long batchId) {
+        YktBatch b = batchId == null ? null : batchMapper.selectById(batchId);
+        if (b == null) throw new BizException("批次不存在");
+        if ("PAID".equals(b.getStatus()) || "PAID_OUT".equals(b.getStatus()))
+            throw new BizException("批次[" + b.getBatchName() + "]已发起支付，不可再停发（请走更正发放）");
+    }
+
+    /** 删除批次（连同花名册）；仅未下达/已下达批次可删；更正发放批次由系统重构生成，禁止删除 */
     @DeleteMapping("/batch/{batchId}")
     public R<Void> deleteBatch(@PathVariable Long batchId) {
+        assertScope(batchId);
         YktBatch b = batchMapper.selectById(batchId);
-        if (b != null && b.getBatchName() != null && b.getBatchName().startsWith("更正发放"))
+        if (b == null) throw new BizException("批次不存在");
+        if (b.getBatchName() != null && b.getBatchName().startsWith("更正发放"))
             throw new BizException("更正发放批次由系统重构生成，不可删除");
+        if (!"NEW".equals(b.getStatus()) && !"ISSUED".equals(b.getStatus()))
+            throw new BizException("批次[" + b.getBatchName() + "]已进入审核/支付流程，不可删除");
         grantMapper.delete(scope().eq("BATCH_ID", batchId));
         batchMapper.deleteById(batchId);
         return R.ok();
@@ -442,6 +529,7 @@ public class YktRosterEditController {
     /** 发放金额合计及批次备注信息 */
     @GetMapping("/{batchId}/summary")
     public R<Map<String, Object>> summary(@PathVariable Long batchId) {
+        assertScope(batchId);
         List<YktGrantDetail> list = grantMapper.selectList(scope().eq("BATCH_ID", batchId));
         BigDecimal total = BigDecimal.ZERO;
         for (YktGrantDetail d : list) if (d.getAmount() != null) total = total.add(d.getAmount());
@@ -458,6 +546,8 @@ public class YktRosterEditController {
     /** 导入花名册（Excel，列与导出一致） */
     @PostMapping("/import")
     public R<Integer> importExcel(@RequestParam Long batchId, @RequestParam("file") MultipartFile file) throws Exception {
+        assertScope(batchId);
+        requireEditable(batchId);
         YktBatch batch = batchMapper.selectById(batchId);
         List<GrantDetailExport> rows = EasyExcel.read(file.getInputStream())
                 .head(GrantDetailExport.class).sheet().doReadSync();
@@ -491,21 +581,32 @@ public class YktRosterEditController {
         return R.ok(n);
     }
 
-    /** 下一个排序号 */
-    private int nextSortNo(Long batchId) {
-        Long cnt = grantMapper.selectCount(scope().eq("BATCH_ID", batchId));
-        return (cnt == null ? 0 : cnt.intValue()) + 1;
+    /** 只查这批人涉及的村组名（≤1000 一组分批），不整表载入 */
+    private Map<Long, String> villageNamesOf(List<YktBeneficiary> people) {
+        Map<Long, String> villageName = new HashMap<>();
+        List<Long> vids = people.stream().map(YktBeneficiary::getVillageId)
+                .filter(Objects::nonNull).distinct().toList();
+        for (int i = 0; i < vids.size(); i += 1000)
+            villageMapper.selectBatchIds(vids.subList(i, Math.min(i + 1000, vids.size())))
+                    .forEach(v -> villageName.put(v.getId(), v.getVillageName()));
+        return villageName;
     }
 
-    /** 回填批次申请人数/金额（编制后批次自带统计） */
+    /** 下一个排序号：MAX+1（count+1 在删过中间行后会与现存序号撞号） */
+    private int nextSortNo(Long batchId) {
+        List<Object> mx = grantMapper.selectObjs(scope().select("NVL(MAX(SORT_NO),0)").eq("BATCH_ID", batchId));
+        int max = mx.isEmpty() || mx.get(0) == null ? 0 : ((Number) mx.get(0)).intValue();
+        return max + 1;
+    }
+
+    /** 回填批次申请人数/金额（编制后批次自带统计）：SQL 端 COUNT/SUM，万人批次不再整表进内存 */
     private void refreshBatchTotals(Long batchId) {
-        List<YktGrantDetail> list = grantMapper.selectList(scope().eq("BATCH_ID", batchId));
-        BigDecimal total = BigDecimal.ZERO;
-        for (YktGrantDetail d : list) if (d.getAmount() != null) total = total.add(d.getAmount());
+        Map<String, Object> agg = grantMapper.selectMaps(scope()
+                .select("COUNT(*) AS CNT", "NVL(SUM(AMOUNT),0) AS AMT").eq("BATCH_ID", batchId)).get(0);
         YktBatch b = new YktBatch();
         b.setId(batchId);
-        b.setPlanCount(list.size());
-        b.setPlanAmount(total);
+        b.setPlanCount(((Number) agg.get("CNT")).intValue());
+        b.setPlanAmount(new BigDecimal(String.valueOf(agg.get("AMT"))));
         batchMapper.updateById(b);
     }
 }

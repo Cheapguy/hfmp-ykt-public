@@ -1,6 +1,7 @@
 package com.bosi.ykt.controller;
 
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.bosi.ykt.common.BaseCrudController;
 import com.bosi.ykt.common.BizException;
 import com.bosi.ykt.common.R;
@@ -27,10 +28,11 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * 补贴批次维护。
+ * 补贴批次维护。手册 §十、§十一(三)
  * 状态机：NEW --下达--> ISSUED --发送一体化--> SENT --(生成支付申请/发放)--> PAID/PAID_OUT
  */
 @RestController
@@ -68,6 +70,26 @@ public class YktBatchController extends BaseCrudController<YktBatchMapper, YktBa
         return R.ok(out);
     }
 
+    /** 县域越权兜底（写路径）：目标乡镇不在本人可见范围则拒（管理员/全部 allowedTowns=null 放行）。 */
+    private void assertTownScope(Long townId) {
+        Set<Long> towns = dataScope.allowedTowns();
+        if (towns == null) return;
+        if (townId == null || !towns.contains(townId))
+            throw new BizException("无权操作该批次（非本县数据）");
+    }
+
+    /** 按批次 id 兜底：反查现存批次的乡镇后校验。 */
+    private YktBatch assertBatchScope(Long batchId) {
+        YktBatch b = batchId == null ? null : mapper.selectById(batchId);
+        if (b == null) throw new BizException("批次不存在");
+        assertTownScope(b.getTownId());
+        return b;
+    }
+
+    /** detail 读取越权兜底：禁止跨县凭 id 越权读批次。 */
+    @Override
+    protected void assertReadable(YktBatch e) { assertTownScope(e.getTownId()); }
+
     /** 当前用户所属县码：org.orgCode 前 6 位；取不到返回 null=全部县（admin） */
     private String currentCounty() {
         Long uid = UserContext.currentUserId();
@@ -97,11 +119,12 @@ public class YktBatchController extends BaseCrudController<YktBatchMapper, YktBa
 
     /** 追加流水（自动算 seqNo），批次发送等步骤接到流程进度尾部 */
     private void appendLog(Long batchId, String doneStation, String opType, String opResult, String pendingStation) {
-        Long maxSeq = auditLogMapper.selectCount(new LambdaQueryWrapper<YktAuditLog>()
-                .eq(YktAuditLog::getBatchId, batchId));
+        java.util.List<Object> mx = auditLogMapper.selectObjs(new QueryWrapper<YktAuditLog>()
+                .select("NVL(MAX(SEQ_NO),0)").eq("BATCH_ID", batchId));
+        int maxSeq = mx.isEmpty() || mx.get(0) == null ? 0 : ((Number) mx.get(0)).intValue();
         YktAuditLog log = new YktAuditLog();
         log.setBatchId(batchId);
-        log.setSeqNo((maxSeq == null ? 0 : maxSeq.intValue()) + 1);
+        log.setSeqNo(maxSeq + 1);
         log.setDoneStation(doneStation);
         Long uid = UserContext.currentUserId();
         SysUser u = uid == null ? null : userMapper.selectById(uid);
@@ -140,6 +163,7 @@ public class YktBatchController extends BaseCrudController<YktBatchMapper, YktBa
 
     @Override
     public R<?> create(@RequestBody YktBatch b) {
+        assertTownScope(b.getTownId());   // 县域越权兜底：不能替别县乡镇建批次
         if (b.getStatus() == null) b.setStatus("NEW");
         if (b.getBatchCode() == null || b.getBatchCode().isBlank()) b.setBatchCode(genBatchCode(0));
         // 未送审批次 auditStage 须为 DRAFT，否则会被「发放数据审核」页(ne DRAFT)错误纳入
@@ -147,6 +171,26 @@ public class YktBatchController extends BaseCrudController<YktBatchMapper, YktBa
         mapper.insert(b);
         writeStartLog(b.getId());
         return R.ok(b);
+    }
+
+    /**
+     * 编辑批次基本信息：县域校验 + 仅未进流程(NEW/ISSUED)可改；
+     * 状态机/资金字段一律清空（MP 忽略 null），杜绝直连 PUT 篡改 status/金额。
+     */
+    @Override
+    public R<?> update(@RequestBody YktBatch b) {
+        if (b.getId() == null) throw new BizException("缺少批次 id");
+        YktBatch old = assertBatchScope(b.getId());
+        if (!"NEW".equals(old.getStatus()) && !"ISSUED".equals(old.getStatus()))
+            throw new BizException("批次已进入审核/支付流程，基本信息不可修改");
+        if (b.getTownId() != null) assertTownScope(b.getTownId());   // 改下达单位也须在本县内
+        b.setStatus(null); b.setAuditStage(null); b.setLastResult(null);
+        b.setPlanCount(null); b.setPlanAmount(null);
+        b.setActualCount(null); b.setActualAmount(null);
+        b.setRefundAmount(null); b.setReturnAmount(null); b.setStopAmount(null);
+        b.setGrantTime(null);
+        mapper.updateById(b);
+        return R.ok();
     }
 
     @Data
@@ -160,13 +204,14 @@ public class YktBatchController extends BaseCrudController<YktBatchMapper, YktBa
         private List<Long> townIds;
     }
 
-    /** 按主管部门新增：选定发放表 + 多个下达单位（乡镇），每个乡镇生成一条未下达批次。*/
+    /** 按主管部门新增：选定发放表 + 多个下达单位（乡镇），每个乡镇生成一条未下达批次。手册 §十-1 */
     @PostMapping("/batch-create")
     @Transactional(rollbackFor = Exception.class)
     public R<?> batchCreate(@RequestBody BatchCreateReq req) {
         if (req.getProjectId() == null) throw new BizException("请选择发放表");
         if (req.getBatchName() == null || req.getBatchName().isBlank()) throw new BizException("请填写批次名称");
         if (req.getTownIds() == null || req.getTownIds().isEmpty()) throw new BizException("请选择下达单位（乡镇）");
+        for (Long townId : req.getTownIds()) assertTownScope(townId);   // 县域越权兜底
         AtomicInteger seq = new AtomicInteger(0);
         for (Long townId : req.getTownIds()) {
             YktBatch b = new YktBatch();
@@ -186,27 +231,28 @@ public class YktBatchController extends BaseCrudController<YktBatchMapper, YktBa
         return R.ok(Map.of("count", req.getTownIds().size()));
     }
 
-    /** 批次编号：6201020002 + yyyyMMddHHmmssSSS + 两位序列，保证同批多乡镇不撞号 */
+    /** 批次编号：6201020002 + yyyyMMddHHmmssSSS + 两位序列 + 三位随机，同批多乡镇/跨请求同毫秒都不撞号 */
     private String genBatchCode(int seq) {
         String ts = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMddHHmmssSSS"));
-        return "6201020002" + ts + String.format("%02d", seq % 100);
+        int rnd = java.util.concurrent.ThreadLocalRandom.current().nextInt(1000);
+        return "6201020002" + ts + String.format("%02d", seq % 100) + String.format("%03d", rnd);
     }
 
     @Override
     public R<?> delete(@PathVariable Long id) {
-        YktBatch b = mapper.selectById(id);
-        if (b != null && !"NEW".equals(b.getStatus())) throw new BizException("只能删除未下达批次");
+        YktBatch b = assertBatchScope(id);
+        if (!"NEW".equals(b.getStatus())) throw new BizException("只能删除未下达批次");
         mapper.deleteById(id);
         return R.ok();
     }
 
-    /** 批次下达。*/
+    /** 批次下达。手册 §十-4 */
     @PostMapping("/{id}/issue")
     public R<?> issue(@PathVariable Long id) {
         return transit(id, "NEW", "ISSUED", "仅未下达批次可下达", "已下达");
     }
 
-    /** 取消批次下达。*/
+    /** 取消批次下达。手册 §十-5 */
     @PostMapping("/{id}/cancel-issue")
     public R<?> cancelIssue(@PathVariable Long id) {
         YktBatch b = mapper.selectById(id);
@@ -215,44 +261,42 @@ public class YktBatchController extends BaseCrudController<YktBatchMapper, YktBa
         return transit(id, "ISSUED", "NEW", "仅已下达批次可取消下达", "未下达");
     }
 
-    /** 批次发送一体化：仅终审(SUBMITTED+DONE)批次可发送，数据推送至上级预算系统。*/
+    /** 批次发送一体化：仅终审(SUBMITTED+DONE)批次可发送，数据推送至预算管理一体化系统。手册 §十一(三) */
     @PostMapping("/{id}/send")
+    @Transactional(rollbackFor = Exception.class)
     public R<?> send(@PathVariable Long id) {
-        YktBatch b = mapper.selectById(id);
-        if (b == null) throw new BizException("批次不存在");
-        if (!("SUBMITTED".equals(b.getStatus()) && "DONE".equals(b.getAuditStage())))
-            throw new BizException("仅终审批次可发送一体化");
-        b.setStatus("SENT");
-        b.setLastResult("已发送一体化");
-        mapper.updateById(b);
-        appendLog(id, "批次发送", "发送", "已发送一体化", "上级系统");
+        assertBatchScope(id);
+        int r = mapper.update(null, new UpdateWrapper<YktBatch>()
+                .eq("ID", id).eq("STATUS", "SUBMITTED").eq("AUDIT_STAGE", "DONE")
+                .set("STATUS", "SENT").set("LAST_RESULT", "已发送一体化"));
+        if (r == 0) throw new BizException("仅终审批次可发送一体化（状态已变更，请刷新）");
+        appendLog(id, "批次发送", "发送", "已发送一体化", "预算一体化");
         return R.ok();
     }
 
-    /** 取消发送：退回终审态；上级系统已生成支付申请则不可取消。*/
+    /** 取消发送：退回终审态；预算一体化已生成支付申请则不可取消。手册 §十一(三) */
     @PostMapping("/{id}/cancel-send")
+    @Transactional(rollbackFor = Exception.class)
     public R<?> cancelSend(@PathVariable Long id) {
-        YktBatch b = mapper.selectById(id);
-        if (b == null) throw new BizException("批次不存在");
-        if (!"SENT".equals(b.getStatus())) throw new BizException("仅已发送批次可取消发送");
+        assertBatchScope(id);
         Long applies = paymentApplyMapper.selectCount(
                 new LambdaQueryWrapper<YktPaymentApply>().eq(YktPaymentApply::getBatchId, id));
-        if (applies != null && applies > 0) throw new BizException("上级系统已生成支付申请，无法取消发送");
-        b.setStatus("SUBMITTED");
-        b.setAuditStage("DONE");
-        b.setLastResult("终审");
-        mapper.updateById(b);
+        if (applies != null && applies > 0) throw new BizException("预算一体化已生成支付申请，无法取消发送");
+        int r = mapper.update(null, new UpdateWrapper<YktBatch>()
+                .eq("ID", id).eq("STATUS", "SENT")
+                .set("STATUS", "SUBMITTED").set("AUDIT_STAGE", "DONE").set("LAST_RESULT", "终审"));
+        if (r == 0) throw new BizException("仅已发送批次可取消发送（状态已变更，请刷新）");
         appendLog(id, "批次发送", "取消", "取消发送", "结束");
         return R.ok();
     }
 
+    /** 状态迁移（条件更新判行数：并发/越权直连拿不到 0→1 以外的结果） */
     private R<?> transit(Long id, String from, String to, String err, String lastResult) {
-        YktBatch b = mapper.selectById(id);
-        if (b == null) throw new BizException("批次不存在");
-        if (!from.equals(b.getStatus())) throw new BizException(err);
-        b.setStatus(to);
-        if (lastResult != null) b.setLastResult(lastResult);
-        mapper.updateById(b);
+        assertBatchScope(id);
+        UpdateWrapper<YktBatch> w = new UpdateWrapper<YktBatch>()
+                .eq("ID", id).eq("STATUS", from).set("STATUS", to);
+        if (lastResult != null) w.set("LAST_RESULT", lastResult);
+        if (mapper.update(null, w) == 0) throw new BizException(err);
         return R.ok();
     }
 }

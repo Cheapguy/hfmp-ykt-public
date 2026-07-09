@@ -13,7 +13,7 @@ import java.math.BigDecimal;
 import java.util.*;
 
 /**
- * 惠民报表。
+ * 惠民报表。手册「惠民报表」模块。
  * 数据源 = 已发放(payStatus=已支付)的花名册明细 YKT_GRANT_DETAIL，关联批次/项目/乡镇。
  *  - 乡镇发放情况个人查询：逐人发放明细 + 多条件筛选 + 合计金额。
  *  - 乡镇项目发放情况查询：按 项目+乡镇 汇总发放人数/金额。
@@ -284,9 +284,13 @@ public class YktReportController {
     public R<List<Map<String, Object>>> usage(@RequestParam(required = false) String startDate,
                                               @RequestParam(required = false) String endDate,
                                               @RequestParam(required = false) String competentDept) {
+        // 县域隔离：ALL=null 不限；COUNTY/OWN_ORG=乡镇 id 集（空集兜 -1 保证零结果）
+        Set<Long> towns = dataScope.allowedTowns();
+        List<Long> townIds = towns == null ? null
+                : (towns.isEmpty() ? List.of(-1L) : new ArrayList<>(towns));
         List<Map<String, Object>> agg = grantMapper.reportUsage(tid(),
                 notBlank(startDate) ? startDate : null, notBlank(endDate) ? endDate : null,
-                notBlank(competentDept) ? competentDept.trim() : null);
+                notBlank(competentDept) ? competentDept.trim() : null, townIds);
         List<Map<String, Object>> out = new ArrayList<>();
         for (Map<String, Object> a : agg) {
             Map<String, Object> m = new LinkedHashMap<>();

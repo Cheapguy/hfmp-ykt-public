@@ -42,8 +42,17 @@ public abstract class BaseCrudController<M extends BaseMapper<E>, E> {
 
     @GetMapping("/{id:\\d+}")
     public R<E> detail(@PathVariable Long id) {
-        return R.ok(getMapper().selectById(id));
+        E e = getMapper().selectById(id);
+        if (e != null) assertReadable(e);   // 县域/租户越权兜底：page/list 有隔离，detail 按 id 必须同样过一遍
+        return R.ok(e);
     }
+
+    /**
+     * 读取越权兜底钩子：默认放行（全局/管理类数据）。
+     * 含县域隐私数据的子类（补贴对象/村组/批次/项目）必须 override，
+     * 否则任何登录账号可凭 id 猜解越权读取（IDOR）。
+     */
+    protected void assertReadable(E entity) { }
 
     @PostMapping
     public R<?> create(@RequestBody E entity) {

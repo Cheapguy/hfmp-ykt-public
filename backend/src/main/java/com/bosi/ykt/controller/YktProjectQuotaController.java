@@ -19,7 +19,7 @@ import org.springframework.web.bind.annotation.*;
 import java.util.*;
 
 /**
- * 项目额度（指标）挂接。
+ * 项目额度（指标）挂接。预算管理一体化 - 预算执行 - 集中支付 - 项目额度规则设置。手册 §十二。
  * 项目由一卡通系统授权显示；只有热点分类含"一卡通"的指标可挂接；支持按优先级/可用金额使用规则。
  */
 @RestController
@@ -47,7 +47,7 @@ public class YktProjectQuotaController {
         if (projectMapper.selectCount(w) == 0) throw new BizException("无权访问该项目（非本县）");
     }
 
-    /** 某项目已挂接的指标列表（补贴项目+使用规则+指标文号+预算项目+资金性质+可支付余额+优先级…） */
+    /** 某项目已挂接的指标列表（手册截图3：补贴项目+使用规则+指标文号+预算项目+资金性质+可支付余额+优先级…） */
     @GetMapping("/list")
     public R<List<Map<String, Object>>> list(@RequestParam Long projectId) {
         assertProjectScope(projectId);
@@ -142,11 +142,16 @@ public class YktProjectQuotaController {
 
     @Data public static class UnlinkReq { private List<Long> ids; }
 
-    /** 撤销挂接 */
+    /** 撤销挂接（县域越权兜底：只可撤本人可见项目的挂接） */
     @PostMapping("/unlink")
     public R<?> unlink(@RequestBody UnlinkReq req) {
         if (req.getIds() == null || req.getIds().isEmpty()) throw new BizException("请选择要撤销的挂接");
-        for (Long id : req.getIds()) mapper.deleteById(id);
+        for (Long id : req.getIds()) {
+            YktProjectQuota q = mapper.selectById(id);
+            if (q == null) continue;
+            assertProjectScope(q.getProjectId());
+            mapper.deleteById(id);
+        }
         return R.ok();
     }
 

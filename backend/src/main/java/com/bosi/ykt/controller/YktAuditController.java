@@ -2,6 +2,7 @@ package com.bosi.ykt.controller;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.bosi.ykt.common.BizException;
@@ -19,12 +20,12 @@ import java.time.LocalDateTime;
 import java.util.*;
 
 /**
- * 发放数据审核（对应生产「发放数据审核 → 审核」菜单）。
- * 岗位链：
+ * 发放数据审核（对应生产「发放数据审核 → 审核」菜单）。手册 §十一(二)
+ * 岗位链（对齐手册）：
  *   乡镇经办岗送审 → 乡镇审核岗(TOWN_AUDIT) → 部门经办岗(DEPT_OP) → 部门审核岗(DEPT_REVIEW) → 终审(DONE)
  * 每岗：审核(逐岗推进) / 取消审核(逐岗回退) / 退回(直接退回乡镇经办岗重编花名册)。
  * 终审 ≠ 批次发送：部门审核岗通过仅置「终审」(DONE)，status 不变；
- * 真正发送至上级系统由「批次发送」菜单单独完成。
+ * 真正发送至预算一体化由「批次发送」菜单单独完成。
  */
 @RestController
 @RequestMapping("/dept/audit")
@@ -76,6 +77,23 @@ public class YktAuditController {
 
     /** 审核链顺序（含 DRAFT=乡镇经办送审前；用于判定"已流过本岗"）。 */
     private static final List<String> CHAIN = List.of("DRAFT", "TOWN_AUDIT", "DEPT_OP", "DEPT_REVIEW", "DONE");
+
+    /** 县域越权兜底：批次乡镇不在本人可见范围则拒（同岗跨县批次不可审）。 */
+    private void assertScope(YktBatch b) {
+        java.util.Set<Long> towns = dataScope.allowedTowns();
+        if (towns == null) return;
+        if (b.getTownId() == null || !towns.contains(b.getTownId()))
+            throw new BizException("无权操作批次[" + b.getBatchName() + "]（非本县数据）");
+    }
+
+    /** 读路径按批次 id 兜底（history/rosters/check-bank 等直连 id 的接口）。 */
+    private void assertScopeById(Long batchId) {
+        java.util.Set<Long> towns = dataScope.allowedTowns();
+        if (towns == null) return;
+        YktBatch b = batchId == null ? null : batchMapper.selectById(batchId);
+        if (b == null || b.getTownId() == null || !towns.contains(b.getTownId()))
+            throw new BizException("无权访问该批次（非本县数据）");
+    }
 
     /** 当前用户经手的阶段：null=管理员(不限)；""=非审核链岗(无待审/已审)；否则=具体 auditStage。 */
     private String myAuditStage() {
@@ -129,11 +147,13 @@ public class YktAuditController {
 
         Page<YktBatch> p = batchMapper.selectPage(new Page<>(pageNum, pageSize), w);
 
-        // 富化：项目名、单位名。用 HashMap 兜底避免 null key NPE
+        // 富化：项目名、单位名。只查当页涉及的 id，不整表载入；HashMap 兜底避免 null key NPE
         Map<Long, String> projName = new HashMap<>();
-        projectMapper.selectList(null).forEach(pr -> projName.put(pr.getId(), pr.getProjectName()));
+        List<Long> pids = p.getRecords().stream().map(YktBatch::getProjectId).filter(Objects::nonNull).distinct().toList();
+        if (!pids.isEmpty()) projectMapper.selectBatchIds(pids).forEach(pr -> projName.put(pr.getId(), pr.getProjectName()));
         Map<Long, String> orgName = new HashMap<>();
-        orgMapper.selectList(null).forEach(o -> orgName.put(o.getId(), o.getOrgName()));
+        List<Long> oids = p.getRecords().stream().map(YktBatch::getTownId).filter(Objects::nonNull).distinct().toList();
+        if (!oids.isEmpty()) orgMapper.selectBatchIds(oids).forEach(o -> orgName.put(o.getId(), o.getOrgName()));
 
         List<Map<String, Object>> records = new ArrayList<>();
         for (YktBatch b : p.getRecords()) {
@@ -158,6 +178,7 @@ public class YktAuditController {
     // ===================== 流程进度（查看） =====================
     @GetMapping("/{id}/history")
     public R<List<YktAuditLog>> history(@PathVariable Long id) {
+        assertScopeById(id);   // 县域隔离：流程进度也不给别县看
         return R.ok(logMapper.selectList(new LambdaQueryWrapper<YktAuditLog>()
                 .eq(YktAuditLog::getBatchId, id).orderByAsc(YktAuditLog::getSeqNo)));
     }
@@ -178,14 +199,17 @@ public class YktAuditController {
         for (Long id : req.getIds()) {
             YktBatch b = batchMapper.selectById(id);
             if (b == null) continue;
+            assertScope(b);                                               // 县域越权拦截
             requireStage(myStage, b.getAuditStage(), b.getBatchName());   // 岗位越权拦截
             String[] adv = ADVANCE.get(b.getAuditStage());
             if (adv == null) throw new BizException("批次[" + b.getBatchName() + "]已终审，无法继续审核");
-            writeLog(b, "审核", adv[1], opinion, adv[0]);
-            b.setAuditStage(adv[0]);
-            b.setLastResult(adv[1]);
+            // 条件推进（并发防护）：0 行=已被并发审核/回退，报冲突而非重复推进
+            int r = batchMapper.update(null, new UpdateWrapper<YktBatch>()
+                    .eq("ID", b.getId()).eq("AUDIT_STAGE", b.getAuditStage())
+                    .set("AUDIT_STAGE", adv[0]).set("LAST_RESULT", adv[1]));
+            if (r == 0) throw new BizException("批次[" + b.getBatchName() + "]状态已变更，请刷新后重试");
             // 终审仅置「终审」态，不自动发送；批次发送(SENT)由「批次发送」菜单单独完成
-            batchMapper.updateById(b);
+            writeLog(b, "审核", adv[1], opinion, adv[0]);
         }
         return R.ok();
     }
@@ -200,6 +224,7 @@ public class YktAuditController {
         for (Long id : req.getIds()) {
             YktBatch b = batchMapper.selectById(id);
             if (b == null) continue;
+            assertScope(b);                                               // 县域越权拦截
             if ("SENT".equals(b.getStatus()) || "PAID".equals(b.getStatus()))
                 throw new BizException("批次[" + b.getBatchName() + "]已发送一体化，无法取消审核");
             int bi = CHAIN.indexOf(b.getAuditStage());
@@ -214,11 +239,14 @@ public class YktAuditController {
                     throw new BizException("批次[" + b.getBatchName() + "]不在您可撤回范围（仅能撤回已流过本岗、且仍在审批中的清册）");
                 target = myStage;                 // 上游岗把清册拉回自己环节
             }
+            // 条件回退（并发防护）：状态与阶段都要还停在读到的样子才生效
+            UpdateWrapper<YktBatch> w = new UpdateWrapper<YktBatch>()
+                    .eq("ID", b.getId()).eq("AUDIT_STAGE", b.getAuditStage()).eq("STATUS", b.getStatus())
+                    .set("AUDIT_STAGE", target).set("LAST_RESULT", ARRIVED_TEXT.getOrDefault(target, target));
+            if ("DRAFT".equals(target)) w.set("STATUS", "ISSUED");   // 撤回到录入=回已下达可编辑态，重进编制花名册
+            if (batchMapper.update(null, w) == 0)
+                throw new BizException("批次[" + b.getBatchName() + "]状态已变更，请刷新后重试");
             writeLog(b, "取消审核", "撤销审核", opinion, target);
-            b.setAuditStage(target);
-            b.setLastResult(ARRIVED_TEXT.getOrDefault(target, target));
-            if ("DRAFT".equals(target)) b.setStatus("ISSUED");   // 撤回到录入=回已下达可编辑态，重进编制花名册
-            batchMapper.updateById(b);
         }
         return R.ok();
     }
@@ -233,17 +261,18 @@ public class YktAuditController {
         for (Long id : req.getIds()) {
             YktBatch b = batchMapper.selectById(id);
             if (b == null) continue;
+            assertScope(b);                                               // 县域越权拦截
             requireStage(myStage, b.getAuditStage(), b.getBatchName());   // 只能退回落在本岗的批次
             // 仅审核中批次可退回；终审/已退回/未送审不可退回（终审撤销请用取消审核）
             if (!"SUBMITTED".equals(b.getStatus()) || "DRAFT".equals(b.getAuditStage()) || "DONE".equals(b.getAuditStage()))
                 throw new BizException("批次[" + b.getBatchName() + "]非审核中状态，无法退回");
             String result = b.getAuditStage().startsWith("DEPT") ? "部门退回" : "乡镇退回";
+            // 条件退回（并发防护）：退回乡镇经办岗=回已下达可编辑态，离开审核链，重编花名册后再送审
+            int r = batchMapper.update(null, new UpdateWrapper<YktBatch>()
+                    .eq("ID", b.getId()).eq("STATUS", "SUBMITTED").eq("AUDIT_STAGE", b.getAuditStage())
+                    .set("STATUS", "ISSUED").set("AUDIT_STAGE", "DRAFT").set("LAST_RESULT", result));
+            if (r == 0) throw new BizException("批次[" + b.getBatchName() + "]状态已变更，请刷新后重试");
             writeLog(b, "退回", result, opinion, "乡镇经办岗");
-            // 退回乡镇经办岗：回到已下达可编辑态，离开审核链，乡镇重新编制花名册后再送审
-            b.setStatus("ISSUED");
-            b.setAuditStage("DRAFT");
-            b.setLastResult(result);
-            batchMapper.updateById(b);
         }
         return R.ok();
     }
@@ -251,12 +280,14 @@ public class YktAuditController {
     // ===================== 补贴花名册 =====================
     @GetMapping("/{id}/rosters")
     public R<List<YktRoster>> rosters(@PathVariable Long id) {
+        assertScopeById(id);   // 县域隔离
         return R.ok(rosterMapper.selectList(new LambdaQueryWrapper<YktRoster>().eq(YktRoster::getBatchId, id)));
     }
 
     // ===================== 校验银行账号 =====================
     @GetMapping("/{id}/check-bank")
     public R<Map<String, Object>> checkBank(@PathVariable Long id) {
+        assertScopeById(id);   // 县域隔离
         List<YktRoster> rs = rosterMapper.selectList(new LambdaQueryWrapper<YktRoster>().eq(YktRoster::getBatchId, id));
         List<String> bad = new ArrayList<>();
         for (YktRoster r : rs) {
@@ -283,20 +314,22 @@ public class YktAuditController {
         applyAuditScope(w, tab);             // 合计与列表口径完全一致
         if (projectId != null) w.eq("PROJECT_ID", projectId);
         dataScope.applyTown(w, "TOWN_ID");   // 县域隔离：合计与列表口径一致
-        BigDecimal total = BigDecimal.ZERO;
-        for (YktBatch b : batchMapper.selectList(w)) {
-            BigDecimal a = b.getActualAmount() != null ? b.getActualAmount() : b.getPlanAmount();
-            if (a != null) total = total.add(a);
-        }
+        // SQL 端求和（实发优先、否则计划），不再全表进内存
+        w.select("NVL(SUM(COALESCE(ACTUAL_AMOUNT, PLAN_AMOUNT)),0) AS TOTAL");
+        List<Object> objs = batchMapper.selectObjs(w);
+        BigDecimal total = objs.isEmpty() || objs.get(0) == null
+                ? BigDecimal.ZERO : new BigDecimal(String.valueOf(objs.get(0)));
         return R.ok(Map.of("totalAmount", total));
     }
 
     // ===================== 写流水 =====================
     private void writeLog(YktBatch b, String opType, String opResult, String opinion, String nextStage) {
-        Long maxSeq = logMapper.selectCount(new LambdaQueryWrapper<YktAuditLog>().eq(YktAuditLog::getBatchId, b.getId()));
+        List<Object> mx = logMapper.selectObjs(new QueryWrapper<YktAuditLog>()
+                .select("NVL(MAX(SEQ_NO),0)").eq("BATCH_ID", b.getId()));
+        int maxSeq = mx.isEmpty() || mx.get(0) == null ? 0 : ((Number) mx.get(0)).intValue();
         YktAuditLog log = new YktAuditLog();
         log.setBatchId(b.getId());
-        log.setSeqNo((maxSeq == null ? 0 : maxSeq.intValue()) + 1);
+        log.setSeqNo(maxSeq + 1);
         log.setDoneStation(STAGE.getOrDefault(b.getAuditStage(), b.getAuditStage()));
         log.setOperator(currentRealName());
         log.setOpType(opType);

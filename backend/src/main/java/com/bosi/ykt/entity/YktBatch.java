@@ -9,7 +9,7 @@ import lombok.EqualsAndHashCode;
 
 import java.math.BigDecimal;
 
-/** 补贴批次维护（主管部门）。*/
+/** 补贴批次维护（主管部门）。手册 §十、§十一 */
 @Data
 @EqualsAndHashCode(callSuper = true)
 @TableName("YKT_BATCH")

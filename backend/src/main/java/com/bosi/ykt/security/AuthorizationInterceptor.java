@@ -12,6 +12,8 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.method.HandlerMethod;
 import org.springframework.web.servlet.HandlerInterceptor;
 
 import java.util.HashSet;
@@ -22,11 +24,16 @@ import java.util.Set;
 /**
  * 授权拦截器（接在 {@link JwtInterceptor} 之后，UserContext 已就绪）。
  *
- * 模型：API 路径前缀 -> 所需菜单 ID，复用 角色 → SYS_ROLE_MENU 的现有授权数据。
+ * 模型：控制器基路径 -> 所需菜单 ID，复用 角色 → SYS_ROLE_MENU 的现有授权数据。
  *  - SYS_ADMIN：全量放行
  *  - writeOnly=false：任何方法都需对应菜单（≈ 管理员专属，如安全管理）
  *  - writeOnly=true：GET/HEAD 放行，写操作需对应菜单
- *  - 未命中任何前缀：放行（/auth、/dashboard、/files 等公共接口）
+ *  - 未命中：放行（/auth、/dashboard、/files 等公共接口）
+ *
+ * 匹配基于 {@link HandlerMethod} 所属控制器类的 {@code @RequestMapping} 基路径做精确匹配，
+ * 而非 {@code getRequestURI()} 字符串前缀——后者对 URL 编码/多斜杠/矩阵参数(;)不规范化，
+ * 存在「拦截器判为公共放行、Spring 路由却分发到受保护控制器」的越权绕过面。
+ * 用已解析的处理器映射判权，从根上消除该类绕过。
  */
 @Component
 @RequiredArgsConstructor
@@ -38,7 +45,7 @@ public class AuthorizationInterceptor implements HandlerInterceptor {
 
     private record Rule(long menuId, boolean writeOnly) {}
 
-    /** 前缀 -> 规则。匹配时取最长命中前缀。菜单 ID 与 schema 种子数据一致。 */
+    /** 控制器基路径(@RequestMapping) -> 规则。精确匹配，键须与各控制器 @RequestMapping 值一致。 */
     private static final Map<String, Rule> RULES = Map.ofEntries(
             // ===== 安全管理：全方法保护 =====
             Map.entry("/sys/user",          new Rule(101, false)),
@@ -54,10 +61,15 @@ public class AuthorizationInterceptor implements HandlerInterceptor {
             Map.entry("/dept/audit",        new Rule(601, true)),
             // ===== 主管部门 =====
             Map.entry("/dept/project",      new Rule(301, true)),
+            Map.entry("/dept/project-policy", new Rule(302, true)),
+            Map.entry("/dept/policy",       new Rule(310, true)),
             Map.entry("/dept/notice",       new Rule(305, true)),
             Map.entry("/dept/batch",        new Rule(306, true)),
+            Map.entry("/dept/correction",   new Rule(308, true)),
             // ===== 花名册 =====
             Map.entry("/roster",            new Rule(401, true)),
+            // 编制花名册写接口：挂隐藏菜单 403(/roster/edit, VISIBLE=0)，migrate_21 授 role 2/7
+            Map.entry("/dept/roster",       new Rule(403, true)),
             // ===== 集中支付 =====
             Map.entry("/pay/quota",         new Rule(501, true)),
             Map.entry("/pay/apply",         new Rule(502, true))
@@ -66,6 +78,8 @@ public class AuthorizationInterceptor implements HandlerInterceptor {
     @Override
     public boolean preHandle(HttpServletRequest req, HttpServletResponse resp, Object handler) {
         if ("OPTIONS".equalsIgnoreCase(req.getMethod())) return true;
+        // 非控制器处理器（静态资源 / 404 转发等）无 @RequestMapping，非我方 API，放行
+        if (!(handler instanceof HandlerMethod hm)) return true;
 
         Long uid = UserContext.currentUserId();
         if (uid == null) return true;
@@ -74,13 +88,7 @@ public class AuthorizationInterceptor implements HandlerInterceptor {
         String ut = u == null ? null : u.getUserType();
         if ("SYS_ADMIN".equals(ut)) return true;
 
-        String path = req.getRequestURI();
-        String ctx = req.getContextPath();
-        if (ctx != null && !ctx.isEmpty() && path.startsWith(ctx)) {
-            path = path.substring(ctx.length());
-        }
-
-        Rule rule = matchLongest(path);
+        Rule rule = RULES.get(controllerBasePath(hm));
         if (rule == null) return true;
 
         boolean isWrite = !("GET".equalsIgnoreCase(req.getMethod()) || "HEAD".equalsIgnoreCase(req.getMethod()));
@@ -92,18 +100,10 @@ public class AuthorizationInterceptor implements HandlerInterceptor {
         return true;
     }
 
-    /** 取最长命中前缀，避免父前缀抢掉更精确的子前缀规则 */
-    private Rule matchLongest(String path) {
-        Rule best = null;
-        int bestLen = -1;
-        for (Map.Entry<String, Rule> e : RULES.entrySet()) {
-            String p = e.getKey();
-            if ((path.equals(p) || path.startsWith(p + "/")) && p.length() > bestLen) {
-                best = e.getValue();
-                bestLen = p.length();
-            }
-        }
-        return best;
+    /** 处理器所属控制器类的 @RequestMapping 基路径（取第一个值）；无则返回 ""。 */
+    private static String controllerBasePath(HandlerMethod hm) {
+        RequestMapping rm = hm.getBeanType().getAnnotation(RequestMapping.class);
+        return (rm != null && rm.value().length > 0) ? rm.value()[0] : "";
     }
 
     private Set<Long> grantedMenuIds(Long uid) {

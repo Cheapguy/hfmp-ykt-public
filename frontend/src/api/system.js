@@ -47,6 +47,7 @@ export const projectApi = {
   approve: (ids, opinion, officeCode, officeName) => request.post('/dept/project/approve', { ids, opinion, officeCode, officeName }),
   reject:  (ids, opinion) => request.post('/dept/project/reject', { ids, opinion }),
   offices: () => request.get('/dept/project/offices'),
+  upload:  (formData) => request.post('/dept/project/upload', formData, { headers: { 'Content-Type': 'multipart/form-data' } }),
   history: (id) => request.get(`/dept/project/${id}/history`),
   revoke:  (id) => request.post(`/dept/project/${id}/revoke`),
   include: (id) => request.post(`/dept/project/${id}/include`),
@@ -88,7 +89,7 @@ export const batchApi = {
   cancelSend:  (id) => request.post(`/dept/batch/${id}/cancel-send`)
 }
 
-// ===== 更正发放 / 批次重构 =====
+// ===== 更正发放 / 批次重构（手册 §十一 八） =====
 export const correctionApi = {
   list:    (params) => request.get('/dept/correction/list', { params }),
   rebuild: (detailIds) => request.post('/dept/correction/rebuild', { detailIds })
@@ -105,7 +106,7 @@ export const rosterApi = {
   back:      (id) => request.post(`/roster/${id}/return`)
 }
 
-// ===== 集中支付（上级系统）=====
+// ===== 集中支付（预算一体化）=====
 export const quotaApi = {
   list:       (projectId) => request.get('/pay/quota/list', { params: { projectId } }),
   indicators: (params) => request.get('/pay/quota/indicators', { params }),

@@ -5,8 +5,10 @@ import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.bosi.ykt.common.BizException;
 import com.bosi.ykt.common.R;
+import com.bosi.ykt.entity.YktBatch;
 import com.bosi.ykt.entity.YktBeneficiary;
 import com.bosi.ykt.entity.YktRoster;
+import com.bosi.ykt.mapper.YktBatchMapper;
 import com.bosi.ykt.mapper.YktBeneficiaryMapper;
 import com.bosi.ykt.mapper.YktRosterMapper;
 import lombok.Data;
@@ -16,9 +18,10 @@ import org.springframework.web.bind.annotation.*;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
- * 花名册维护。
+ * 花名册维护。手册 §十一
  * 审核流：DRAFT --乡镇送审--> TOWN_SUBMIT --乡镇审核--> TOWN_AUDIT
  *         --部门送审--> DEPT_SUBMIT --部门审核(终审)--> FINAL
  * 送审时与补贴对象库按 姓名/身份证/社保卡/村组 校验。
@@ -30,7 +33,25 @@ public class YktRosterController {
 
     private final YktRosterMapper mapper;
     private final YktBeneficiaryMapper beneficiaryMapper;
+    private final YktBatchMapper batchMapper;
     private final com.bosi.ykt.security.DataScopeResolver dataScope;
+
+    /** 县域越权兜底：花名册经批次归乡镇，校验批次乡镇在本人可见范围内（allowedTowns=null 即 ALL 放行）。 */
+    private void assertBatchScope(Long batchId) {
+        Set<Long> towns = dataScope.allowedTowns();
+        if (towns == null) return;
+        YktBatch b = batchId == null ? null : batchMapper.selectById(batchId);
+        if (b == null || b.getTownId() == null || !towns.contains(b.getTownId()))
+            throw new BizException("无权操作该花名册（非本县数据）");
+    }
+
+    /** 按花名册 id 反查其批次乡镇后校验（防直连传别县 rosterId）。返回现存记录。 */
+    private YktRoster assertRosterScope(Long id) {
+        YktRoster r = id == null ? null : mapper.selectById(id);
+        if (r == null) throw new BizException("花名册记录不存在");
+        assertBatchScope(r.getBatchId());
+        return r;
+    }
 
     /** 审核状态推进次序 */
     private static final Map<String, String> NEXT = Map.of(
@@ -55,14 +76,29 @@ public class YktRosterController {
 
     @PostMapping
     public R<?> save(@RequestBody YktRoster r) {
-        if (r.getAuditStatus() == null) r.setAuditStatus("DRAFT");
-        if (r.getPayStatus() == null) r.setPayStatus("NONE");
-        if (r.getId() == null) mapper.insert(r); else mapper.updateById(r);
+        if (r.getId() == null) {
+            // 新增：目标批次须在本县范围内，且不能替别县批次填报
+            assertBatchScope(r.getBatchId());
+            if (r.getAuditStatus() == null) r.setAuditStatus("DRAFT");
+            if (r.getPayStatus() == null) r.setPayStatus("NONE");
+            mapper.insert(r);
+        } else {
+            // 修改：以现存记录的归属批次判县域（防传本县 batchId 改别县 rosterId）；仅待编制可改
+            YktRoster old = assertRosterScope(r.getId());
+            if (!"DRAFT".equals(old.getAuditStatus()))
+                throw new BizException("花名册已送审，待编制状态方可修改");
+            r.setBatchId(old.getBatchId());   // 归属批次以库为准，禁止改挂到别的批次
+            r.setAuditStatus(null); r.setPayStatus(null);   // 状态不经此接口改
+            mapper.updateById(r);
+        }
         return R.ok(r);
     }
 
     @DeleteMapping("/{id}")
     public R<?> delete(@PathVariable Long id) {
+        YktRoster old = assertRosterScope(id);
+        if (!"DRAFT".equals(old.getAuditStatus()))
+            throw new BizException("花名册已送审，待编制状态方可删除");
         mapper.deleteById(id);
         return R.ok();
     }
@@ -76,10 +112,11 @@ public class YktRosterController {
         private BigDecimal amount;
     }
 
-    /** 批量填报：从补贴对象库按村组拉人进花名册。*/
+    /** 批量填报：从补贴对象库按村组拉人进花名册。手册 §十一(一)-4 */
     @PostMapping("/batch-fill")
     public R<Map<String, Object>> batchFill(@RequestBody BatchFillReq req) {
         if (req.getBatchId() == null) throw new BizException("缺少批次");
+        assertBatchScope(req.getBatchId());   // 县域越权兜底：不能替别县批次批量填报
         List<YktBeneficiary> people = beneficiaryMapper.selectList(
                 new LambdaQueryWrapper<YktBeneficiary>()
                         .eq(req.getTownId() != null, YktBeneficiary::getTownId, req.getTownId())
@@ -104,11 +141,10 @@ public class YktRosterController {
         return R.ok(Map.of("filled", n));
     }
 
-    /** 送审：校验与补贴对象库一致。*/
+    /** 送审：校验与补贴对象库一致。手册 §十一(二) */
     @PostMapping("/{id}/submit")
     public R<?> submit(@PathVariable Long id) {
-        YktRoster r = mapper.selectById(id);
-        if (r == null) throw new BizException("花名册记录不存在");
+        YktRoster r = assertRosterScope(id);   // 县域越权兜底
         if (!"DRAFT".equals(r.getAuditStatus())) throw new BizException("仅待编制状态可送审");
         validate(r);
         r.setAuditStatus("TOWN_SUBMIT");
@@ -116,11 +152,10 @@ public class YktRosterController {
         return R.ok();
     }
 
-    /** 审核：推进到下一审核阶段。*/
+    /** 审核：推进到下一审核阶段。手册 §十一(二) */
     @PostMapping("/{id}/audit")
     public R<?> audit(@PathVariable Long id) {
-        YktRoster r = mapper.selectById(id);
-        if (r == null) throw new BizException("花名册记录不存在");
+        YktRoster r = assertRosterScope(id);   // 县域越权兜底
         String next = NEXT.get(r.getAuditStatus());
         if (next == null) throw new BizException("当前状态无法继续审核");
         r.setAuditStatus(next);
@@ -128,11 +163,10 @@ public class YktRosterController {
         return R.ok();
     }
 
-    /** 退回到待编制。*/
+    /** 退回到待编制。手册 §十一(二) */
     @PostMapping("/{id}/return")
     public R<?> back(@PathVariable Long id) {
-        YktRoster r = mapper.selectById(id);
-        if (r == null) throw new BizException("花名册记录不存在");
+        YktRoster r = assertRosterScope(id);   // 县域越权兜底
         r.setAuditStatus("DRAFT");
         mapper.updateById(r);
         return R.ok();

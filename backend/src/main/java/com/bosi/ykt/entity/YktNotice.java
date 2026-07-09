@@ -7,7 +7,7 @@ import com.bosi.ykt.common.BaseEntity;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 
-/** 通知公告管理（主管部门上传 / 乡镇下载）。*/
+/** 通知公告管理（主管部门上传 / 乡镇下载）。手册 §九 */
 @Data
 @EqualsAndHashCode(callSuper = true)
 @TableName("YKT_NOTICE")

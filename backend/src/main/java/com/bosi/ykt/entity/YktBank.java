@@ -7,7 +7,7 @@ import com.bosi.ykt.common.BaseEntity;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 
-/** 开户银行设置维护（系统设置）。*/
+/** 开户银行设置维护（系统设置）。手册 §五 */
 @Data
 @EqualsAndHashCode(callSuper = true)
 @TableName("YKT_BANK")

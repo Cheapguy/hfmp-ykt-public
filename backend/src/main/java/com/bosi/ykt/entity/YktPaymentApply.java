@@ -9,7 +9,7 @@ import lombok.EqualsAndHashCode;
 
 import java.math.BigDecimal;
 
-/** 支付申请（集中支付）。*/
+/** 支付申请（集中支付）。手册 §十三、§十四 */
 @Data
 @EqualsAndHashCode(callSuper = true)
 @TableName("YKT_PAYMENT_APPLY")

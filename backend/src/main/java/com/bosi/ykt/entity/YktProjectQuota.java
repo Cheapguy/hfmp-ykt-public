@@ -9,7 +9,7 @@ import lombok.EqualsAndHashCode;
 
 import java.math.BigDecimal;
 
-/** 项目额度（指标）挂接。按优先级使用指标 */
+/** 项目额度（指标）挂接。手册 §十二：按优先级使用指标 */
 @Data
 @EqualsAndHashCode(callSuper = true)
 @TableName("YKT_PROJECT_QUOTA")

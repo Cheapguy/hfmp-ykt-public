@@ -10,7 +10,7 @@ import lombok.EqualsAndHashCode;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 
-/** 花名册明细（发放明细）。来源：清册明细 + 银行信息 */
+/** 花名册明细（发放明细）。来源：清册明细 SSO_SUBSIDY_TAB_DETAIL_HIST + FCT 银行信息 */
 @Data
 @EqualsAndHashCode(callSuper = true)
 @TableName("YKT_GRANT_DETAIL")

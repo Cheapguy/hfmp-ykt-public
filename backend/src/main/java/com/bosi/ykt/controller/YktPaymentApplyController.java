@@ -2,6 +2,7 @@ package com.bosi.ykt.controller;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.bosi.ykt.common.BizException;
@@ -18,7 +19,7 @@ import java.math.BigDecimal;
 import java.util.*;
 
 /**
- * 一卡通发放申请。
+ * 一卡通发放申请（预算管理一体化 - 集中支付 - 一卡通发放申请）。手册 §十三。
  * 待支付 = 已发送一体化(SENT)的批次；发起支付按项目使用规则逐指标预扣减额度，生成支付申请，批次→已支付(PAID)。
  * 已支付可撤销支付：回滚指标额度、删除申请、批次回退待支付(SENT)。
  */
@@ -102,7 +103,11 @@ public class YktPaymentApplyController {
         assertScope(req.getBatchId());
         YktBatch b = batchMapper.selectById(req.getBatchId());
         if (b == null) throw new BizException("批次不存在");
-        if (!"SENT".equals(b.getStatus())) throw new BizException("仅已发送一体化的批次可发起支付");
+        // 条件更新抢占批次（并发防护）：两个请求同时发起支付时只有一个能把 SENT 翻成 PAID
+        int claimed = batchMapper.update(null, new UpdateWrapper<YktBatch>()
+                .eq("ID", b.getId()).eq("STATUS", "SENT")
+                .set("STATUS", "PAID").set("LAST_RESULT", "已支付"));
+        if (claimed == 0) throw new BizException("仅已发送一体化的批次可发起支付（状态已变更，请刷新）");
 
         BigDecimal amount = applyAmount(b);
         List<Deduct> ded = computeDeduction(b.getProjectId(), amount);   // 不足会抛异常
@@ -118,11 +123,8 @@ public class YktPaymentApplyController {
         mapper.insert(a);
 
         for (Deduct d : ded) {
-            // 扣减指标：可用余额 -= 扣减，冻结 += 扣减
-            YktIndicator ind = indicatorMapper.selectById(d.indicatorId);
-            ind.setAvailableAmount(nz(ind.getAvailableAmount()).subtract(d.deduct));
-            ind.setFrozenAmount(nz(ind.getFrozenAmount()).add(d.deduct));
-            indicatorMapper.updateById(ind);
+            // 扣减指标：原子 SQL（可用余额 -= 扣减，冻结 += 扣减），余额守卫防并发扣成负数
+            deductIndicator(d.indicatorId, d.indicatorNo, d.deduct);
             YktPayApplyDetail pd = new YktPayApplyDetail();
             pd.setApplyId(a.getId());
             pd.setIndicatorId(d.indicatorId);
@@ -131,15 +133,10 @@ public class YktPaymentApplyController {
             detailMapper.insert(pd);
         }
 
-        b.setStatus("PAID");
-        b.setLastResult("已支付");
-        batchMapper.updateById(b);
         // 花名册支付状态 → 已生成支付申请（已停发的不发起支付，保持「已停发」待银行环节退款）
-        for (YktGrantDetail g : grantMapper.selectList(grantScope(b.getId()))) {
-            if ("已停发".equals(g.getPayStatus())) continue;
-            g.setPayStatus("已生成支付申请");
-            grantMapper.updateById(g);
-        }
+        grantMapper.update(null, grantScopeUpdate(b.getId())
+                .ne("PAY_STATUS", "已停发")
+                .set("PAY_STATUS", "已生成支付申请"));
         return R.ok(Map.of("applyId", a.getId(), "applyNo", a.getApplyNo()));
     }
 
@@ -150,34 +147,46 @@ public class YktPaymentApplyController {
         Long batchId = body.get("batchId") == null ? null : Long.valueOf(String.valueOf(body.get("batchId")));
         if (batchId == null) throw new BizException("缺少批次");
         assertScope(batchId);
-        YktBatch b = batchMapper.selectById(batchId);
-        if (b == null) throw new BizException("批次不存在");
-        if (!"PAID".equals(b.getStatus())) throw new BizException("仅已支付批次可撤销支付");
+        // 条件更新抢占批次（并发防护）：只有一个请求能把 PAID 翻回 SENT，防止额度被双份回滚
+        int claimed = batchMapper.update(null, new UpdateWrapper<YktBatch>()
+                .eq("ID", batchId).eq("STATUS", "PAID")
+                .set("STATUS", "SENT").set("LAST_RESULT", "已发送一体化"));
+        if (claimed == 0) throw new BizException("仅已支付批次可撤销支付（状态已变更，请刷新）");
 
         for (YktPaymentApply a : mapper.selectList(new LambdaQueryWrapper<YktPaymentApply>()
                 .eq(YktPaymentApply::getBatchId, batchId))) {
             if ("PAID".equals(a.getStatus())) throw new BizException("支付申请已支付完成，不可撤销");
-            // 回滚指标额度
-            for (YktPayApplyDetail d : detailMapper.selectList(new LambdaQueryWrapper<YktPayApplyDetail>()
-                    .eq(YktPayApplyDetail::getApplyId, a.getId()))) {
-                YktIndicator ind = indicatorMapper.selectById(d.getIndicatorId());
-                if (ind != null) {
-                    ind.setAvailableAmount(nz(ind.getAvailableAmount()).add(nz(d.getDeductAmount())));
-                    ind.setFrozenAmount(nz(ind.getFrozenAmount()).subtract(nz(d.getDeductAmount())));
-                    indicatorMapper.updateById(ind);
-                }
-                detailMapper.deleteById(d.getId());
-            }
+            rollbackApply(a.getId());
             mapper.deleteById(a.getId());
         }
-        b.setStatus("SENT");
-        b.setLastResult("已发送一体化");
-        batchMapper.updateById(b);
-        for (YktGrantDetail g : grantMapper.selectList(grantScope(batchId))) {
-            g.setPayStatus("已申请");
-            grantMapper.updateById(g);
-        }
+        // 已停发的保持停发标记，其余回「已申请」
+        grantMapper.update(null, grantScopeUpdate(batchId)
+                .ne("PAY_STATUS", "已停发")
+                .set("PAY_STATUS", "已申请"));
         return R.ok();
+    }
+
+    /** 回滚一个支付申请的全部指标扣减：先删明细行（删到才回加，天然幂等防并发双回滚），再原子加回额度。 */
+    private void rollbackApply(Long applyId) {
+        for (YktPayApplyDetail d : detailMapper.selectList(new LambdaQueryWrapper<YktPayApplyDetail>()
+                .eq(YktPayApplyDetail::getApplyId, applyId))) {
+            if (detailMapper.deleteById(d.getId()) == 0) continue;   // 已被并发处理
+            BigDecimal amt = nz(d.getDeductAmount());
+            indicatorMapper.update(null, new UpdateWrapper<YktIndicator>()
+                    .eq("ID", d.getIndicatorId())
+                    .setSql("AVAILABLE_AMOUNT = NVL(AVAILABLE_AMOUNT,0) + " + amt.toPlainString()
+                            + ", FROZEN_AMOUNT = NVL(FROZEN_AMOUNT,0) - " + amt.toPlainString()));
+        }
+    }
+
+    /** 原子扣减指标额度：余额守卫（不足=0 行）防并发把可用余额扣成负数。 */
+    private void deductIndicator(Long indicatorId, String indicatorNo, BigDecimal amt) {
+        int r = indicatorMapper.update(null, new UpdateWrapper<YktIndicator>()
+                .eq("ID", indicatorId)
+                .apply("NVL(AVAILABLE_AMOUNT,0) >= " + amt.toPlainString())
+                .setSql("AVAILABLE_AMOUNT = NVL(AVAILABLE_AMOUNT,0) - " + amt.toPlainString()
+                        + ", FROZEN_AMOUNT = NVL(FROZEN_AMOUNT,0) + " + amt.toPlainString()));
+        if (r == 0) throw new BizException("指标[" + indicatorNo + "]可用余额不足（可能被并发扣减），请刷新后重试");
     }
 
     /** 某批次已生成的支付申请 + 指标扣减明细（已支付-查看详情） */
@@ -222,7 +231,7 @@ public class YktPaymentApplyController {
         return R.ok(m);
     }
 
-    /** 支付申请列表（支付申请录入用，按状态过滤） */
+    /** 支付申请列表（手册 §十四 支付申请录入用，按状态过滤） */
     @GetMapping("/page")
     public R<IPage<YktPaymentApply>> page(@RequestParam(defaultValue = "1") long pageNum,
                                           @RequestParam(defaultValue = "10") long pageSize,
@@ -236,7 +245,7 @@ public class YktPaymentApplyController {
         return R.ok(mapper.selectPage(new Page<>(pageNum, pageSize), w));
     }
 
-    // ========================= 支付申请录入（签章送审） =========================
+    // ========================= 手册 §十四 支付申请录入（签章送审） =========================
 
     /** 待送审 / 已送审 支付申请列表（带批次、项目名富化） */
     @GetMapping("/submit-list")
@@ -275,9 +284,9 @@ public class YktPaymentApplyController {
         YktPaymentApply a = mapper.selectById(id);
         if (a == null) throw new BizException("支付申请不存在");
         assertScope(a.getBatchId());
-        if (!"PENDING_SUBMIT".equals(a.getStatus())) throw new BizException("仅待送审的申请可签章送审");
-        a.setStatus("SUBMITTED");
-        mapper.updateById(a);
+        int r = mapper.update(null, new UpdateWrapper<YktPaymentApply>()
+                .eq("ID", id).eq("STATUS", "PENDING_SUBMIT").set("STATUS", "SUBMITTED"));
+        if (r == 0) throw new BizException("仅待送审的申请可签章送审（状态已变更，请刷新）");
         return R.ok();
     }
 
@@ -289,29 +298,17 @@ public class YktPaymentApplyController {
         if (a == null) throw new BizException("支付申请不存在");
         assertScope(a.getBatchId());
         if ("PAID".equals(a.getStatus())) throw new BizException("已支付的申请不可删除");
-        // 回滚指标额度
-        for (YktPayApplyDetail d : detailMapper.selectList(new LambdaQueryWrapper<YktPayApplyDetail>()
-                .eq(YktPayApplyDetail::getApplyId, a.getId()))) {
-            YktIndicator ind = indicatorMapper.selectById(d.getIndicatorId());
-            if (ind != null) {
-                ind.setAvailableAmount(nz(ind.getAvailableAmount()).add(nz(d.getDeductAmount())));
-                ind.setFrozenAmount(nz(ind.getFrozenAmount()).subtract(nz(d.getDeductAmount())));
-                indicatorMapper.updateById(ind);
-            }
-            detailMapper.deleteById(d.getId());
-        }
-        mapper.deleteById(a.getId());
+        // 先删申请行抢占（并发防护）：删到才继续，防两个请求各回滚一遍额度
+        if (mapper.deleteById(a.getId()) == 0) throw new BizException("该支付申请已被处理，请刷新");
+        rollbackApply(a.getId());
         // 批次退回终审，一卡通侧需重新「批次发送一体化」
-        YktBatch b = batchMapper.selectById(a.getBatchId());
-        if (b != null) {
-            b.setStatus("SUBMITTED");
-            b.setAuditStage("DONE");
-            b.setLastResult("终审");
-            batchMapper.updateById(b);
-            for (YktGrantDetail g : grantMapper.selectList(grantScope(b.getId()))) {
-                g.setPayStatus("已申请");
-                grantMapper.updateById(g);
-            }
+        int r = batchMapper.update(null, new UpdateWrapper<YktBatch>()
+                .eq("ID", a.getBatchId()).eq("STATUS", "PAID")
+                .set("STATUS", "SUBMITTED").set("AUDIT_STAGE", "DONE").set("LAST_RESULT", "终审"));
+        if (r > 0) {
+            grantMapper.update(null, grantScopeUpdate(a.getBatchId())
+                    .ne("PAY_STATUS", "已停发")
+                    .set("PAY_STATUS", "已申请"));
         }
         return R.ok();
     }
@@ -356,7 +353,10 @@ public class YktPaymentApplyController {
         YktPaymentApply a = mapper.selectById(id);
         if (a == null) throw new BizException("支付申请不存在");
         assertScope(a.getBatchId());
-        if (!"SUBMITTED".equals(a.getStatus())) throw new BizException("仅已送审的申请可进行银行代发");
+        // 条件更新抢占申请（并发防护）：两个代发请求只有一个能把 SUBMITTED 翻成 PAID
+        int claimed = mapper.update(null, new UpdateWrapper<YktPaymentApply>()
+                .eq("ID", id).eq("STATUS", "SUBMITTED").set("STATUS", "PAID"));
+        if (claimed == 0) throw new BizException("仅已送审的申请可进行银行代发（状态已变更，请刷新）");
         YktBatch b = batchMapper.selectById(a.getBatchId());
         if (b == null) throw new BizException("批次不存在");
 
@@ -379,6 +379,7 @@ public class YktPaymentApplyController {
                 String reason = failMap.get(d.getId());
                 d.setPayStatus("支付失败");
                 d.setFailReason(reason);
+                grantMapper.updateById(d);   // 失败逐条更新（原因各异）
                 failCnt++; failAmt = failAmt.add(amt);
                 Map<String, Object> f = new LinkedHashMap<>();
                 f.put("name", d.getBeneficiaryName() != null ? d.getBeneficiaryName() : d.getHolderName());
@@ -387,44 +388,42 @@ public class YktPaymentApplyController {
                 f.put("reason", reason);
                 fails.add(f);
             } else {
-                d.setPayStatus("已支付");
-                d.setFailReason(null);
                 okCnt++; okAmt = okAmt.add(amt);
             }
-            grantMapper.updateById(d);
         }
         if (okCnt == 0 && failCnt == 0 && stopCnt == 0) throw new BizException("该批次无可代发明细（须为已生成支付申请）");
+        // 成功明细一条 SQL 批量置「已支付」（万人批次不再逐行往返）；失败的已在上面逐条改掉
+        grantMapper.update(null, grantScopeUpdate(b.getId())
+                .eq("PAY_STATUS", "已生成支付申请")
+                .set("PAY_STATUS", "已支付").set("FAIL_REASON", null));
 
-        // 指标核算：解冻全部，成功额转「已支付」，失败额退回「可用」（钱守恒）
+        // 指标核算：解冻全部，成功额转「已支付」，失败额退回「可用」（钱守恒）；原子 SQL 防并发覆盖
         BigDecimal failRemain = failAmt;
         for (YktPayApplyDetail d : detailMapper.selectList(new LambdaQueryWrapper<YktPayApplyDetail>()
                 .eq(YktPayApplyDetail::getApplyId, a.getId()))) {
-            YktIndicator ind = indicatorMapper.selectById(d.getIndicatorId());
-            if (ind == null) continue;
             BigDecimal dd = nz(d.getDeductAmount());
             BigDecimal back = failRemain.min(dd);          // 本指标退回可用的部分
             BigDecimal paidPart = dd.subtract(back);       // 本指标实付的部分
-            ind.setFrozenAmount(nz(ind.getFrozenAmount()).subtract(dd));
-            ind.setAvailableAmount(nz(ind.getAvailableAmount()).add(back));
-            ind.setPaidAmount(nz(ind.getPaidAmount()).add(paidPart));
-            indicatorMapper.updateById(ind);
+            indicatorMapper.update(null, new UpdateWrapper<YktIndicator>()
+                    .eq("ID", d.getIndicatorId())
+                    .setSql("FROZEN_AMOUNT = NVL(FROZEN_AMOUNT,0) - " + dd.toPlainString()
+                            + ", AVAILABLE_AMOUNT = NVL(AVAILABLE_AMOUNT,0) + " + back.toPlainString()
+                            + ", PAID_AMOUNT = NVL(PAID_AMOUNT,0) + " + paidPart.toPlainString()));
             failRemain = failRemain.subtract(back);
         }
 
-        // 申请→已支付；批次→已发放，回填：实发=成功 / 退回=银行失败 / 退款=停发
-        a.setStatus("PAID");
-        mapper.updateById(a);
-        b.setStatus("PAID_OUT");
-        b.setActualCount(okCnt);
-        b.setActualAmount(okAmt);
-        b.setReturnAmount(failAmt);
-        b.setRefundAmount(stopAmt);
-        b.setGrantTime(java.time.LocalDateTime.now());
+        // 批次→已发放，回填：实发=成功 / 退回=银行失败 / 退款=停发（申请已在入口抢占时置 PAID）
         StringBuilder lr = new StringBuilder(okCnt > 0 ? "已发放" : "未发放");
         if (failCnt > 0) lr.append("·退回").append(failCnt).append("人");
         if (stopCnt > 0) lr.append("·停发").append(stopCnt).append("人");
-        b.setLastResult(lr.toString());
-        batchMapper.updateById(b);
+        int flipped = batchMapper.update(null, new UpdateWrapper<YktBatch>()
+                .eq("ID", b.getId()).eq("STATUS", "PAID")
+                .set("STATUS", "PAID_OUT")
+                .set("ACTUAL_COUNT", okCnt).set("ACTUAL_AMOUNT", okAmt)
+                .set("RETURN_AMOUNT", failAmt).set("REFUND_AMOUNT", stopAmt)
+                .set("GRANT_TIME", java.time.LocalDateTime.now())
+                .set("LAST_RESULT", lr.toString()));
+        if (flipped == 0) throw new BizException("批次状态已变更（可能已被并发处理），本次代发已回滚");
 
         Map<String, Object> r = new LinkedHashMap<>();
         r.put("okCount", okCnt); r.put("okAmount", okAmt);
@@ -436,12 +435,14 @@ public class YktPaymentApplyController {
 
     // ===== 内部 =====
 
-    /** 申请金额：汇总花名册（排除已停发——停发的不发起支付，走退款） */
+    /** 申请金额：SQL 端汇总花名册（排除已停发——停发的不发起支付，走退款），万人批次不进内存 */
     private BigDecimal applyAmount(YktBatch b) {
-        BigDecimal t = BigDecimal.ZERO;
-        for (YktGrantDetail g : grantMapper.selectList(grantScope(b.getId())))
-            if (g.getAmount() != null && !"已停发".equals(g.getPayStatus())) t = t.add(g.getAmount());
-        return t;
+        QueryWrapper<YktGrantDetail> w = grantScope(b.getId())
+                .select("NVL(SUM(AMOUNT),0) AS AMT");
+        w.and(x -> x.isNull("PAY_STATUS").or().ne("PAY_STATUS", "已停发"));   // NULL 状态也计入，与原 Java 口径一致
+        List<Object> objs = grantMapper.selectObjs(w);
+        return objs.isEmpty() || objs.get(0) == null
+                ? BigDecimal.ZERO : new BigDecimal(String.valueOf(objs.get(0)));
     }
 
     static class Deduct { Long indicatorId; String indicatorNo; YktIndicator ind; BigDecimal deduct; int priority; }
@@ -519,6 +520,19 @@ public class YktPaymentApplyController {
         return w;
     }
 
+    /** 花名册批量更新用（与 grantScope 同口径的 UpdateWrapper） */
+    private UpdateWrapper<YktGrantDetail> grantScopeUpdate(Long batchId) {
+        UpdateWrapper<YktGrantDetail> w = new UpdateWrapper<>();
+        Long t = tid();
+        if (t != null) w.eq("TENANT_ID", t);
+        w.eq("BATCH_ID", batchId);
+        return w;
+    }
+
     private static BigDecimal nz(BigDecimal v) { return v == null ? BigDecimal.ZERO : v; }
-    private String genApplyNo() { return "PA" + System.currentTimeMillis(); }
+    /** 申请号：时间戳 + 三位随机，跨请求同毫秒不撞 */
+    private String genApplyNo() {
+        return "PA" + System.currentTimeMillis()
+                + String.format("%03d", java.util.concurrent.ThreadLocalRandom.current().nextInt(1000));
+    }
 }

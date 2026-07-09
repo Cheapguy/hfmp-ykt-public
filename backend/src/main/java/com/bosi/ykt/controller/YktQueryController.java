@@ -74,10 +74,13 @@ public class YktQueryController {
 
         Page<YktBatch> p = batchMapper.selectPage(new Page<>(pageNum, pageSize), w);
 
+        // 只查当页涉及的项目/单位名，不整表载入
         Map<Long, String> projName = new HashMap<>();
-        projectMapper.selectList(null).forEach(pr -> projName.put(pr.getId(), pr.getProjectName()));
+        List<Long> pids = p.getRecords().stream().map(YktBatch::getProjectId).filter(Objects::nonNull).distinct().toList();
+        if (!pids.isEmpty()) projectMapper.selectBatchIds(pids).forEach(pr -> projName.put(pr.getId(), pr.getProjectName()));
         Map<Long, String> orgName = new HashMap<>();
-        orgMapper.selectList(null).forEach(o -> orgName.put(o.getId(), o.getOrgName()));
+        List<Long> oids = p.getRecords().stream().map(YktBatch::getTownId).filter(Objects::nonNull).distinct().toList();
+        if (!oids.isEmpty()) orgMapper.selectBatchIds(oids).forEach(o -> orgName.put(o.getId(), o.getOrgName()));
 
         List<Map<String, Object>> records = new ArrayList<>();
         for (YktBatch b : p.getRecords()) {
@@ -128,6 +131,13 @@ public class YktQueryController {
     /** 流程进度（与发放数据审核共用流水表） */
     @GetMapping("/{id}/history")
     public R<List<YktAuditLog>> history(@PathVariable Long id) {
+        // 县域隔离：批次不在本人可见范围则拒
+        Set<Long> towns = dataScope.allowedTowns();
+        if (towns != null) {
+            YktBatch b = batchMapper.selectById(id);
+            if (b == null || b.getTownId() == null || !towns.contains(b.getTownId()))
+                throw new com.bosi.ykt.common.BizException("无权访问该批次（非本县数据）");
+        }
         return R.ok(logMapper.selectList(new LambdaQueryWrapper<YktAuditLog>()
                 .eq(YktAuditLog::getBatchId, id).orderByAsc(YktAuditLog::getSeqNo)));
     }

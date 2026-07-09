@@ -7,7 +7,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
-/** 开户银行设置维护。*/
+/** 开户银行设置维护。手册 §五 */
 @RestController
 @RequestMapping("/setup/bank")
 @RequiredArgsConstructor

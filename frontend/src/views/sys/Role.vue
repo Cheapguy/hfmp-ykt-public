@@ -17,9 +17,27 @@
       </template>
     </CrudTable>
 
-    <el-dialog v-model="assignVisible" title="分配菜单权限" width="420px">
-      <el-tree ref="treeRef" :data="menuTree" show-checkbox node-key="id" default-expand-all
-        :props="{ label: 'menuName', children: 'children' }" />
+    <el-dialog v-model="assignVisible" :title="`分配菜单权限 —— ${curRole?.roleName || ''}`" width="560px">
+      <div class="assign-toolbar">
+        <el-input v-model="filterText" placeholder="搜索菜单名称" clearable style="width:220px" size="small" />
+        <div class="assign-btns">
+          <el-button size="small" @click="checkAll">全选</el-button>
+          <el-button size="small" @click="clearAll">清空</el-button>
+        </div>
+      </div>
+      <div class="assign-tree-wrap">
+        <el-tree ref="treeRef" :data="menuTree" show-checkbox node-key="id" default-expand-all
+          :filter-node-method="filterNode"
+          :props="{ label: 'menuName', children: 'children' }">
+          <template #default="{ data }">
+            <span class="tree-node">
+              <span>{{ data.menuName }}</span>
+              <el-tag v-if="data.menuType === 'F'" size="small" type="warning" class="node-tag">按钮</el-tag>
+              <el-tag v-else-if="data.visible === 0" size="small" type="info" class="node-tag">隐藏</el-tag>
+            </span>
+          </template>
+        </el-tree>
+      </div>
       <template #footer>
         <el-button @click="assignVisible = false">取消</el-button>
         <el-button type="primary" @click="doAssign">保存</el-button>
@@ -29,7 +47,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import CrudTable from '../../components/CrudTable.vue'
 import { roleApi, roleMenuApi, menuApi } from '../../api/system'
@@ -53,8 +71,10 @@ const formFields = [
 const rules = { roleName: [{ required: true, message: '请输入角色名称', trigger: 'blur' }] }
 
 const menuTree = ref([])
+const parentIds = new Set()   // 有子节点的菜单 id：回显时必须滤掉，防父节点勾选扩散整棵子树
 onMounted(async () => {
   const flat = await menuApi.tree()
+  ;(flat || []).forEach(m => { if (m.parentId) parentIds.add(m.parentId) })
   menuTree.value = buildTree(flat || [])
 })
 function buildTree(flat) {
@@ -67,14 +87,28 @@ function buildTree(flat) {
 const assignVisible = ref(false)
 const treeRef = ref()
 const curRole = ref(null)
+const filterText = ref('')
+watch(filterText, v => treeRef.value?.filter(v))
+function filterNode(value, data) { return !value || (data.menuName || '').includes(value) }
+
 async function openAssign(row) {
   curRole.value = row
+  filterText.value = ''
   assignVisible.value = true
   const ids = await roleMenuApi.getMenuIds(row.id)
   await new Promise(r => setTimeout(r, 0))
-  // 仅勾选叶子，父节点交给 el-tree 半选逻辑
-  treeRef.value.setCheckedKeys(ids || [])
+  // 只回显叶子：库里存的授权含半选父节点(保存时混入)，直接 setCheckedKeys 会让
+  // el-tree 把父节点整棵子树全勾上——重开弹窗再保存就静默扩权。父节点交给半选逻辑推导。
+  treeRef.value.setCheckedKeys((ids || []).filter(id => !parentIds.has(id)))
 }
+function checkAll() {
+  const leaves = []
+  const walk = ns => ns.forEach(n => { if (n.children?.length) walk(n.children); else leaves.push(n.id) })
+  walk(menuTree.value)
+  treeRef.value.setCheckedKeys(leaves)
+}
+function clearAll() { treeRef.value.setCheckedKeys([]) }
+
 async function doAssign() {
   const checked = treeRef.value.getCheckedKeys()
   const half = treeRef.value.getHalfCheckedKeys()
@@ -83,3 +117,10 @@ async function doAssign() {
   assignVisible.value = false
 }
 </script>
+
+<style scoped>
+.assign-toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.assign-tree-wrap { max-height: 440px; overflow-y: auto; border: 1px solid var(--el-border-color-lighter); border-radius: 6px; padding: 8px; }
+.tree-node { display: flex; align-items: center; gap: 6px; }
+.node-tag { transform: scale(0.85); }
+</style>

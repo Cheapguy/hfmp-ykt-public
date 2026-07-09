@@ -29,7 +29,7 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 /**
- * 通知公告管理（主管部门端上传/下发 + 乡镇端下载）。
+ * 通知公告管理（主管部门端上传/下发 + 乡镇端下载）。手册 §九
  * <p>下发口径：{@code targetOrgIds} 逗号分隔存乡镇 SYS_ORG.id（= YKT_AGENCY.townId）。
  * 乡镇端仅可见 targetOrgIds 含本机构 id 的公告；未下发（空）= 无人可见。
  */
@@ -67,9 +67,7 @@ public class YktNoticeController extends BaseCrudController<YktNoticeMapper, Ykt
         if (file == null || file.isEmpty()) throw new BizException("请选择要上传的文件");
         String original = file.getOriginalFilename();
         if (original == null || original.isBlank()) original = "notice";
-        String ext = "";
-        int dot = original.lastIndexOf('.');
-        if (dot >= 0) ext = original.substring(dot);
+        String ext = com.bosi.ykt.common.UploadExt.checkedExt(original);   // 扩展名白名单
         String stored = UUID.randomUUID().toString().replace("-", "") + ext;
 
         Path dir = Paths.get(baseDir);
@@ -132,7 +130,7 @@ public class YktNoticeController extends BaseCrudController<YktNoticeMapper, Ykt
 
         LambdaQueryWrapper<YktNotice> w = new LambdaQueryWrapper<>();
         if (tid != null) w.eq(YktNotice::getTenantId, tid);
-        // 匹配逗号分隔中的整段 id，避免 62292 误命中 990008
+        // 匹配逗号分隔中的整段 id，避免 99000 误命中 990008
         w.and(x -> x.eq(YktNotice::getTargetOrgIds, oid)
                 .or().likeRight(YktNotice::getTargetOrgIds, oid + ",")
                 .or().likeLeft(YktNotice::getTargetOrgIds, "," + oid)

@@ -9,7 +9,7 @@ import lombok.EqualsAndHashCode;
 
 import java.math.BigDecimal;
 
-/** 花名册明细（乡镇填报 → 多级审核）。*/
+/** 花名册明细（乡镇填报 → 多级审核）。手册 §十一 */
 @Data
 @EqualsAndHashCode(callSuper = true)
 @TableName("YKT_ROSTER")

@@ -31,7 +31,8 @@ import java.util.stream.Collectors;
  * </ul>
  * 过滤以 {@code .apply(原生SQL)} 注入，兼容 QueryWrapper / LambdaQueryWrapper。
  * 拼入的都是库内数字 id 与 6 位县码，非用户输入，无 SQL 注入风险。
- * 每个 buildQuery 只调一次，内部 2~3 条小查询，不缓存（无状态、无 ThreadLocal 泄漏）。
+ * 解析结果缓存在当前请求属性（SCOPE_REQUEST，随请求结束释放，无 ThreadLocal 泄漏），
+ * 一个请求内多次 apply 只解析一次。
  */
 @Component
 @RequiredArgsConstructor
@@ -54,33 +55,52 @@ public class DataScopeResolver {
             this.scope = s; this.countyCode = cc; this.ownTownId = own; this.countyTownIds = towns;
         }
         static Ctx all() { return new Ctx(Scope.ALL, null, null, null); }
+        /** 最窄拒止：推不出县的非管理员账号——乡镇条件恒空(=-1)，项目只剩省级公有。 */
+        static Ctx deny() { return new Ctx(Scope.OWN_ORG, "000000", -1L, null); }
     }
 
-    /** 解析当前用户的数据范围。取不到用户/机构/县 → 一律按 ALL（不拦，避免登录态异常误锁）。 */
+    private static final String REQ_ATTR = DataScopeResolver.class.getName() + ".CTX";
+
+    /**
+     * 解析当前用户的数据范围。取不到用户/机构/县 → 一律按 ALL（不拦，避免登录态异常误锁）。
+     * 结果缓存在当前 HTTP 请求属性里（一个请求多次 apply 只解析一次）；非 Web 线程直接解析。
+     */
     public Ctx current() {
+        org.springframework.web.context.request.RequestAttributes attrs =
+                org.springframework.web.context.request.RequestContextHolder.getRequestAttributes();
+        if (attrs != null) {
+            Object cached = attrs.getAttribute(REQ_ATTR, org.springframework.web.context.request.RequestAttributes.SCOPE_REQUEST);
+            if (cached instanceof Ctx c) return c;
+        }
+        Ctx c = resolve();
+        if (attrs != null) attrs.setAttribute(REQ_ATTR, c, org.springframework.web.context.request.RequestAttributes.SCOPE_REQUEST);
+        return c;
+    }
+
+    private Ctx resolve() {
         Long uid = UserContext.currentUserId();
         SysUser u = uid == null ? null : userMapper.selectById(uid);
-        if (u == null || u.getOrgId() == null) return Ctx.all();
+        if (u == null) return Ctx.all();   // 无登录态的公开接口（health 等）不误锁；业务接口有认证拦截兜底
         if ("SYS_ADMIN".equals(u.getUserType())) return Ctx.all();
 
         Scope s = widestScope(uid);
         if (s == Scope.ALL) return Ctx.all();
 
-        SysOrg org = orgMapper.selectById(u.getOrgId());
+        SysOrg org = u.getOrgId() == null ? null : orgMapper.selectById(u.getOrgId());
         String cc = (org != null && org.getOrgCode() != null && org.getOrgCode().length() >= 6)
                 ? org.getOrgCode().substring(0, 6) : null;
-        if (cc == null) return Ctx.all();
+        if (cc == null) return Ctx.deny();   // 非管理员没配机构/县码 → 最窄（原先给 ALL=可读全州，配置缺陷变后门）
 
         List<Long> townIds = (s == Scope.COUNTY) ? countyTownIds(cc) : null;
         return new Ctx(s, cc, u.getOrgId(), townIds);
     }
 
-    /** 多角色取最宽范围：ALL > COUNTY > OWN_ORG。无角色 → ALL（无角色也无菜单，进不到业务页）。 */
+    /** 多角色取最宽范围：ALL > COUNTY > OWN_ORG。无角色 → 最窄(OWN_ORG)——GET 类接口对 writeOnly 菜单一律放行，给 ALL 等于让无角色账号读全州。 */
     private Scope widestScope(Long uid) {
         List<Long> roleIds = userRoleMapper.selectList(
                         new LambdaQueryWrapper<SysUserRole>().eq(SysUserRole::getUserId, uid))
                 .stream().map(SysUserRole::getRoleId).toList();
-        if (roleIds.isEmpty()) return Scope.ALL;
+        if (roleIds.isEmpty()) return Scope.OWN_ORG;
         Scope s = Scope.OWN_ORG;
         for (SysRole r : roleMapper.selectBatchIds(roleIds)) {
             Scope rs = parse(r.getDataScope());
@@ -132,9 +152,10 @@ public class DataScopeResolver {
     public void applyProject(AbstractWrapper<?, ?, ?> w, String codeCol) {
         Ctx c = current();
         if (c.scope == Scope.ALL) return;
-        List<Long> assigned = assignedProjectIds();
-        if (!assigned.isEmpty()) {
-            w.apply("ID IN (" + assigned.stream().map(String::valueOf).collect(Collectors.joining(",")) + ")");
+        Long uid = UserContext.currentUserId();
+        if (uid != null && hasAssignedProjects(uid)) {
+            // 子查询而非拼 id 列表：授权项目再多也不会踩 ORA-01795（IN 上限 1000）
+            w.apply("ID IN (SELECT PROJECT_ID FROM SYS_USER_PROJECT WHERE USER_ID = " + uid + ")");
             return;
         }
         String owned = ownedCountyPrefixesCsv();
@@ -143,13 +164,11 @@ public class DataScopeResolver {
                 + " OR SUBSTR(" + codeCol + ",1,7) NOT IN (" + owned + "))");
     }
 
-    /** 当前用户「分配数据」显式授权的项目 id；空=未显式分配（走县码规则）。 */
-    private List<Long> assignedProjectIds() {
-        Long uid = UserContext.currentUserId();
-        if (uid == null) return List.of();
-        return userProjectMapper.selectList(
-                        new LambdaQueryWrapper<SysUserProject>().eq(SysUserProject::getUserId, uid))
-                .stream().map(SysUserProject::getProjectId).toList();
+    /** 该用户是否有「分配数据」显式授权；无=走县码规则。 */
+    private boolean hasAssignedProjects(Long uid) {
+        Long n = userProjectMapper.selectCount(
+                new LambdaQueryWrapper<SysUserProject>().eq(SysUserProject::getUserId, uid));
+        return n != null && n > 0;
     }
 
     /**

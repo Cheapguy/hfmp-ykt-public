@@ -31,8 +31,8 @@
         <el-form-item label="所属机构">
           <el-tree-select v-model="dataForm.orgId" :data="orgTree" node-key="id" check-strictly
             :props="{ label: 'orgName', children: 'children' }" placeholder="选择县 / 乡镇 / 部门"
-            style="width:100%" filterable />
-          <div class="form-hint">部门/财政岗选到「县」或该县民政局/财政局(定本县)，乡镇岗选到具体「乡镇」(定本乡镇)。</div>
+            style="width:100%" filterable clearable />
+          <div class="form-hint">部门/财政岗选到「县」或该县民政局/财政局(定本县)，乡镇岗选到具体「乡镇」(定本乡镇)。清空保存=移除机构，该账号将无任何县域数据可见。</div>
         </el-form-item>
         <el-form-item label="项目权限">
           <el-transfer v-model="dataForm.projectIds" :data="transferData" filterable
@@ -81,11 +81,13 @@ function buildOrgTree(flat) {
 
 const UTYPE = { SYS_ADMIN: '系统管理员', TOWN_OP: '乡镇经办', TOWN_AUDIT: '乡镇审核', DEPT_OP: '部门经办', DEPT_AUDIT: '部门审核', FINANCE: '财政' }
 const columns = [
-  { prop: 'username', label: '账号', width: 140 },
-  { prop: 'realName', label: '姓名', width: 120 },
-  { prop: 'userType', label: '类型', width: 120 },
-  { prop: 'phone', label: '手机号', width: 140 },
-  { prop: 'status', label: '状态', width: 90, align: 'center' }
+  { prop: 'username', label: '账号', width: 130 },
+  { prop: 'realName', label: '姓名', width: 110 },
+  { prop: 'userType', label: '类型', width: 110 },
+  { prop: 'orgName', label: '所属机构', minWidth: 160 },
+  { prop: 'roleNames', label: '角色', minWidth: 140 },
+  { prop: 'phone', label: '手机号', width: 130 },
+  { prop: 'status', label: '状态', width: 80, align: 'center' }
 ]
 const searchFields = [{ prop: 'username', label: '账号' }, { prop: 'realName', label: '姓名' }]
 const formFields = [

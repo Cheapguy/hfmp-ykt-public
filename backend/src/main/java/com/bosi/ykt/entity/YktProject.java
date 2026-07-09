@@ -7,7 +7,7 @@ import com.bosi.ykt.common.BaseEntity;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 
-/** 补贴项目维护（主管部门）。*/
+/** 补贴项目维护（主管部门）。手册 §七 */
 @Data
 @EqualsAndHashCode(callSuper = true)
 @TableName("YKT_PROJECT")
@@ -39,7 +39,7 @@ public class YktProject extends BaseEntity {
     private String policyDocName;
     /** 政策文号 */
     private String policyDocNo;
-    /** 政策文件（占位：文件名，附件上传下一轮接入） */
+    /** 政策文件附件：/files/preview 下载地址（旧数据可能是纯文件名文本） */
     private String policyFile;
     /** 补贴标准 */
     private String subsidyStandard;
