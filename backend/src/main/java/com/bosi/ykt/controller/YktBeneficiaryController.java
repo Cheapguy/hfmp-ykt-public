@@ -5,10 +5,12 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.bosi.ykt.common.BaseCrudController;
 import com.bosi.ykt.common.BizException;
 import com.bosi.ykt.common.R;
+import com.bosi.ykt.entity.SysOrg;
 import com.bosi.ykt.entity.SysUser;
 import com.bosi.ykt.entity.YktBank;
 import com.bosi.ykt.entity.YktBeneficiary;
 import com.bosi.ykt.entity.YktVillage;
+import com.bosi.ykt.mapper.SysOrgMapper;
 import com.bosi.ykt.mapper.SysUserMapper;
 import com.bosi.ykt.mapper.YktBankMapper;
 import com.bosi.ykt.mapper.YktBeneficiaryMapper;
@@ -45,6 +47,7 @@ public class YktBeneficiaryController extends BaseCrudController<YktBeneficiaryM
     private final YktVillageMapper villageMapper;
     private final YktBankMapper bankMapper;
     private final SysUserMapper userMapper;
+    private final SysOrgMapper orgMapper;
     private final com.bosi.ykt.security.DataScopeResolver dataScope;
     @Override protected YktBeneficiaryMapper getMapper() { return mapper; }
 
@@ -93,17 +96,51 @@ public class YktBeneficiaryController extends BaseCrudController<YktBeneficiaryM
     @Override
     protected void assertReadable(YktBeneficiary e) { assertTownScope(e.getTownId()); }
 
+    /** 归属辖区展示（对齐生产文案）：如「甲县-甲县一号镇人民政府」；机构缺失时降级。 */
+    private String ownerLabel(Long townId) {
+        SysOrg town = townId == null ? null : orgMapper.selectById(townId);
+        if (town == null) return "未知辖区";
+        String code = town.getOrgCode();
+        if (code != null && code.length() >= 6) {
+            SysOrg county = orgMapper.selectOne(new QueryWrapper<SysOrg>()
+                    .eq("ORG_CODE", code.substring(0, 6)).eq("ORG_TYPE", "COUNTY").last("AND ROWNUM=1"));
+            if (county != null) return county.getOrgName() + "-" + town.getOrgName();
+        }
+        return town.getOrgName();
+    }
+
+    /** 全库按身份证查现存对象（跨辖区也算重复，报错要指明现存记录归属谁的辖区）。 */
+    private YktBeneficiary findByIdCard(String idCard) {
+        if (idCard == null || idCard.isBlank()) return null;
+        return mapper.selectOne(new QueryWrapper<YktBeneficiary>()
+                .eq("ID_CARD", idCard.trim()).last("AND ROWNUM=1"));
+    }
+
     @Override
     public R<?> create(@org.springframework.web.bind.annotation.RequestBody YktBeneficiary e) {
         assertTownScope(e.getTownId());
+        // 引用建档（referred=1，人户迁移复制建档）放行同证复制，普通新增全库查重
+        if (!Integer.valueOf(1).equals(e.getReferred())) {
+            YktBeneficiary d = findByIdCard(e.getIdCard());
+            if (d != null) throw new BizException("家庭成员姓名：" + d.getName() + "，身份证号码：" + d.getIdCard()
+                    + " 在系统中(" + ownerLabel(d.getTownId()) + ")已存在！");
+        }
         return super.create(e);
     }
 
     @Override
     public R<?> update(@org.springframework.web.bind.annotation.RequestBody YktBeneficiary e) {
         if (e.getId() == null) throw new com.bosi.ykt.common.BizException("缺少 id");
-        assertExisting(e.getId());
+        YktBeneficiary old = assertExisting(e.getId());
         if (e.getTownId() != null) assertTownScope(e.getTownId());   // 改乡镇归属也须在本县内
+        // 仅当把身份证号改成了别的号时查重（不改号的常规编辑不受已有引用副本影响）
+        if (e.getIdCard() != null && !e.getIdCard().isBlank()
+                && !e.getIdCard().trim().equals(old.getIdCard())) {
+            YktBeneficiary d = findByIdCard(e.getIdCard());
+            if (d != null && !d.getId().equals(e.getId()))
+                throw new BizException("家庭成员姓名：" + d.getName() + "，身份证号码：" + d.getIdCard()
+                        + " 在系统中(" + ownerLabel(d.getTownId()) + ")已存在！");
+        }
         return super.update(e);
     }
 
@@ -159,7 +196,7 @@ public class YktBeneficiaryController extends BaseCrudController<YktBeneficiaryM
     /** 必填列（参照 import.xls：有数据的列均必填） */
     private static final Set<String> REQUIRED = Set.of(
             "农户编码", "户主姓名", "户主身份证号", "家庭成员姓名", "身份证号",
-            "村(居)委会", "村（居）民小组", "年龄", "与户主关系", "账户名称", "银行账号", "开户银行");
+            "村(居)委会", "村（居）民小组", "与户主关系", "账户名称", "银行账号", "开户银行");
 
     /**
      * 与户主关系 34 项（与前端 人员新增/批量修改 的 RELATION_OPTS 同源，存纯文本）。
@@ -263,6 +300,7 @@ public class YktBeneficiaryController extends BaseCrudController<YktBeneficiaryM
         List<String> errs = new ArrayList<>();
         List<YktBeneficiary> out = new ArrayList<>();
         Set<String> seenIdCards = new HashSet<>();
+        Map<String, String> dupMeta = new LinkedHashMap<>();   // idCard -> "Excel行号：N 家庭成员姓名：X"（库内查重报错用）
         for (int r = 1; r < raw.size(); r++) {
             Map<Integer, String> row = raw.get(r);
             boolean blank = true;
@@ -311,10 +349,9 @@ public class YktBeneficiaryController extends BaseCrudController<YktBeneficiaryM
             }
             e.setGender(gender);
             e.setPhone(v[9]);
-            if (!v[10].isEmpty()) {
+            if (!v[10].isEmpty()) {   // 年龄不是校验列：可空，解析不了也不报错（能解析才落库）
                 String age = v[10].endsWith(".0") ? v[10].substring(0, v[10].length() - 2) : v[10];
-                if (!age.matches("\\d{1,3}")) errs.add("Excel行号：" + rowNo + " 年龄：" + v[10] + " 必须为整数，请核对！");
-                else e.setAge(Integer.parseInt(age));
+                if (age.matches("\\d{1,3}")) e.setAge(Integer.parseInt(age));
             }
             String rel = v[11].replaceFirst("^\\d{1,2}-", "");   // 认「01-本人」或「本人」
             if (!rel.isEmpty() && !RELATIONS.contains(rel))
@@ -342,21 +379,29 @@ public class YktBeneficiaryController extends BaseCrudController<YktBeneficiaryM
             e.setIsDibao(flags[0]); e.setIsRural(flags[1]); e.setIsFiling(flags[2]); e.setIsTekun(flags[3]);
             e.setRemark(v[22]);   // 创建人列导入时忽略，由系统记录
 
-            if (!v[5].isEmpty() && !seenIdCards.add(v[5]))
-                errs.add("Excel行号：" + rowNo + " 身份证号：" + v[5] + " 在文件内重复，请核对！");
+            if (!v[5].isEmpty()) {
+                if (!seenIdCards.add(v[5]))
+                    errs.add("Excel行号：" + rowNo + " 身份证号：" + v[5] + " 在文件内重复，请核对！");
+                else
+                    dupMeta.put(v[5], "Excel行号：" + rowNo + " 家庭成员姓名：" + v[4]);
+            }
             e.setReferred(0);
             out.add(e);
         }
         if (out.isEmpty()) throw new BizException("导入文件无有效数据行");
 
-        // 库内查重（分块防 ORA-01795）：同辖区已有同身份证的对象即拒
+        // 库内查重（分块防 ORA-01795）：全库查（跨辖区也算重复），报错指明现存记录归属谁的辖区（对齐生产文案）
         List<String> ids = seenIdCards.stream().toList();
+        Set<String> reported = new HashSet<>();
         for (int i = 0; i < ids.size(); i += 900) {
             QueryWrapper<YktBeneficiary> dw = new QueryWrapper<>();
             dw.in("ID_CARD", ids.subList(i, Math.min(i + 900, ids.size())));
-            if (allowed != null) dw.in("TOWN_ID", allowed);
-            for (YktBeneficiary d : mapper.selectList(dw))
-                errs.add("身份证号：" + d.getIdCard() + "（" + d.getName() + "）的补贴对象已存在，请勿重复导入！");
+            for (YktBeneficiary d : mapper.selectList(dw)) {
+                if (!reported.add(d.getIdCard())) continue;   // 同证多条（引用副本）只报一次
+                String meta = dupMeta.getOrDefault(d.getIdCard(), "家庭成员姓名：" + d.getName());
+                errs.add(meta + "，身份证号码：" + d.getIdCard()
+                        + " 在系统中(" + ownerLabel(d.getTownId()) + ")已存在！");
+            }
         }
         if (!errs.isEmpty()) return R.ok(Map.of("count", 0, "errors", errs));
 
