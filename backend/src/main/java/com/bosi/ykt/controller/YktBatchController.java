@@ -90,14 +90,14 @@ public class YktBatchController extends BaseCrudController<YktBatchMapper, YktBa
     @Override
     protected void assertReadable(YktBatch e) { assertTownScope(e.getTownId()); }
 
-    /** 当前用户所属县码：org.orgCode 前 6 位；取不到返回 null=全部县（admin） */
+    /**
+     * 当前用户所属县码；null=全部县。以数据范围为准：ALL（管理员/全州角色）→ null，
+     * 否则取 DataScope 解析出的县码——此前直接拿 org.orgCode 前 6 位，管理员机构码恰好落在某县时
+     * 下达单位就只剩那个县的乡镇（实测 admin 只见单县）。
+     */
     private String currentCounty() {
-        Long uid = UserContext.currentUserId();
-        SysUser u = uid == null ? null : userMapper.selectById(uid);
-        if (u == null || u.getOrgId() == null) return null;
-        SysOrg org = orgMapper.selectById(u.getOrgId());
-        if (org == null || org.getOrgCode() == null || org.getOrgCode().length() < 6) return null;
-        return org.getOrgCode().substring(0, 6);
+        com.bosi.ykt.security.DataScopeResolver.Ctx c = dataScope.current();
+        return c.scope == com.bosi.ykt.security.DataScopeResolver.Scope.ALL ? null : c.countyCode;
     }
 
     /** 批次创建即写「开始·新增」流水，使「查看」流程进度从头完整 */

@@ -434,7 +434,7 @@ public class YktProjectController extends BaseCrudController<YktProjectMapper, Y
      * 终审后生成项目编码：县级项目 = '9'+创建者县码(6位)+5位序列（12 位），
      * 与县域可见性前缀规则(9+县码)一致——旧版 "962"+时间戳 生成的编码永远匹配不上任何县，
      * 会把县自建项目错判成省级公有全州可见。推不出县（州级/系统建）→ '969' 打头公有编码
-     * （'969' 不会撞任何 '9'+县码：县 orgCode 均为 6229xx）。
+     * （'969' 不会撞任何 '9'+县码：县 orgCode 均为 9900xx）。
      */
     private String genProjectCode(Long createBy) {
         String county = creatorCounty(createBy);

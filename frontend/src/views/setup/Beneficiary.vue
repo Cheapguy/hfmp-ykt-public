@@ -11,8 +11,8 @@
         <el-button type="primary" :icon="Plus" @click="crud.openForm()">新增</el-button>
         <el-button :icon="Edit" @click="editSel">修改</el-button>
         <el-button :icon="Delete" @click="delSel">删除</el-button>
-        <el-button @click="tip('导入')">导入</el-button>
-        <el-button @click="tip('导出')">导出</el-button>
+        <el-button @click="openImport">导入</el-button>
+        <el-button :loading="exporting" @click="doExport">导出</el-button>
         <el-button @click="cancelSel">注销</el-button>
         <el-button @click="uncancelSel">取消注销</el-button>
         <el-button @click="referVisible = true">引用</el-button>
@@ -51,6 +51,32 @@
         </el-select>
       </template>
     </CrudTable>
+
+    <!-- 导入选项（对齐生产：选文件 + 导出模板 / 导入 / 取消） -->
+    <input ref="fileInput" type="file" accept=".xlsx,.xls" style="display:none" @change="onFileChange" />
+    <el-dialog v-model="importVisible" title="导入选项" width="520px">
+      <div class="import-row">
+        <el-input :model-value="importFile ? importFile.name : ''" placeholder="请选择需要导入的文件..." readonly />
+        <el-button @click="fileInput?.click()">浏览...</el-button>
+      </div>
+      <template #footer>
+        <el-button @click="downloadTemplate">导出模板</el-button>
+        <el-button type="primary" :loading="importing" @click="doImport">导 入</el-button>
+        <el-button @click="importVisible = false">取 消</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 信息校验日志（导入前置校验） -->
+    <el-dialog v-model="logVisible" title="信息校验日志" width="72%" top="6vh">
+      <div class="log-bar">
+        <el-button size="small" round @click="exportLog">导出日志信息</el-button>
+        <el-button size="small" round @click="logVisible = false">关闭</el-button>
+      </div>
+      <el-table :data="logRows" border stripe size="small" height="56vh">
+        <el-table-column type="index" label="序号" width="60" align="center" />
+        <el-table-column prop="msg" label="信息校验结果" min-width="500" show-overflow-tooltip />
+      </el-table>
+    </el-dialog>
 
     <!-- 引用 -->
     <el-dialog v-model="referVisible" title="引用补贴对象" width="480px">
@@ -105,11 +131,12 @@ const STATUS_OPTS = [{ label: '0-作废', value: '0' }, { label: '1-正常', val
 const YESNO_OPTS  = [{ label: '0-否', value: '0' }, { label: '1-是', value: '1' }]
 const GENDER_OPTS = [{ label: '1-男', value: '1' }, { label: '2-女', value: '2' }]
 const RURAL_OPTS  = [{ label: '1-乡村', value: '1' }, { label: '2-城镇', value: '2' }]
+// 与户主关系 34 项：value 存纯文本（与库/导入导出/生产口径一致；此前存数字码与库内文本对不上）
 const RELATION_OPTS = ['01-本人','02-妻子','03-兄弟','04-姐妹','05-父亲','06-母亲','07-外婆','08-外公',
   '09-儿子','10-女儿','11-孙子','12-孙女','13-丈夫','14-祖父','15-祖母','16-儿媳',
   '17-女婿','18-嫂子','19-弟媳','20-舅舅','21-外甥','22-姑嫂','23-伯叔','24-伯母',
   '25-侄子','26-侄女','27-孙女婿','28-孙媳','29-重孙','30-婆婆','31-公公','32-爸爸',
-  '33-奶奶','34-其他'].map(s => ({ label: s, value: s.slice(0, 2) }))
+  '33-奶奶','34-其他'].map(s => ({ label: s, value: s.slice(3) }))
 const labelOf = (opts, v) => opts.find(o => o.value === String(v))?.label || v || '-'
 const statusTag = (v) => ({ '0': 'info', '1': 'success', '2': 'warning' }[String(v)] || 'info')
 
@@ -282,7 +309,6 @@ async function uncancelSel() {
   ElMessage.success('已取消注销'); afterBatch()
 }
 function afterBatch() { crud.value.clearSelection(); sel.value = []; crud.value.reload() }
-function tip(n) { ElMessage.info(`「${n}」功能开发中`) }
 
 /* ============ 批量修改：选中数据整列铺开行内编辑 ============ */
 const batchVisible = ref(false)
@@ -354,9 +380,51 @@ const crud = ref()
 const referVisible = ref(false); const referId = ref(''); const referResult = ref(null); const referSearched = ref(false)
 async function doRefer() { referSearched.value = true; referResult.value = await beneficiaryApi.refer(referId.value) }
 function confirmRefer() { crud.value.openForm({ ...referResult.value, id: null, referred: 1 }); referVisible.value = false }
+
+/* ============ 导入 / 导出（对齐生产「导入选项」）============ */
+const fileInput = ref(null)
+const importVisible = ref(false); const importing = ref(false); const importFile = ref(null)
+const exporting = ref(false)
+function openImport() { importFile.value = null; importVisible.value = true }
+function onFileChange(e) { importFile.value = e.target.files?.[0] || null; e.target.value = '' }
+async function downloadTemplate() {
+  saveBlob(await beneficiaryApi.importTemplate(), '补贴对象导入模板.xls')
+}
+async function doImport() {
+  if (!importFile.value) return ElMessage.warning('请先选择需要导入的文件')
+  importing.value = true
+  try {
+    const fd = new FormData(); fd.append('file', importFile.value)
+    const res = await beneficiaryApi.importFile(fd)
+    if (res && res.errors && res.errors.length) { showLog(res.errors); return }   // 校验不过整体不导入
+    ElMessage.success(`导入 ${res?.count ?? 0} 条`)
+    importVisible.value = false; importFile.value = null
+    crud.value.reload()
+  } finally { importing.value = false }
+}
+async function doExport() {
+  exporting.value = true
+  try { saveBlob(await beneficiaryApi.exportAll(), '补贴对象花名册.xls') }
+  finally { exporting.value = false }
+}
+
+/* 信息校验日志 */
+const logVisible = ref(false); const logRows = ref([])
+function showLog(errors) { logRows.value = (errors || []).map(msg => ({ msg })); logVisible.value = true }
+function exportLog() {
+  const text = logRows.value.map((r, i) => `${i + 1}\t${r.msg}`).join('\r\n')
+  saveBlob(new Blob(['﻿序号\t信息校验结果\r\n' + text], { type: 'text/plain;charset=utf-8' }), '信息校验日志.txt')
+}
+function saveBlob(blob, filename) {
+  const url = URL.createObjectURL(blob); const a = document.createElement('a')
+  a.href = url; a.download = filename; document.body.appendChild(a); a.click()
+  document.body.removeChild(a); URL.revokeObjectURL(url)
+}
 </script>
 
 <style scoped>
+.import-row { display: flex; gap: 8px; align-items: center; }
+.log-bar { margin-bottom: 10px; }
 .batch-toolbar { margin-bottom: 10px; }
 .batch-listbar { display: flex; align-items: center; gap: 6px; font-weight: 600; color: #1f5fbf;
   background: #eef5fe; border: 1px solid #d4e4fb; border-bottom: none; padding: 6px 12px; }

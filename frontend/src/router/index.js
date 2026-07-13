@@ -27,6 +27,7 @@ const Project = () => import('../views/dept/Project.vue')
 const ProjectAudit = () => import('../views/dept/ProjectAudit.vue')
 const ProjectLink = () => import('../views/dept/ProjectLink.vue')
 const ProjectPolicy = () => import('../views/dept/ProjectPolicy.vue')
+const TplDefine = () => import('../views/dept/TplDefine.vue')
 const ProjectQuery = () => import('../views/dept/ProjectQuery.vue')
 const Notice  = () => import('../views/dept/Notice.vue')
 const Policy  = () => import('../views/dept/Policy.vue')
@@ -70,6 +71,7 @@ const routes = [
       { path: 'dept/project-audit',name: 'ProjectAudit',component: ProjectAudit,meta: { title: '补贴项目审核' } },
       { path: 'dept/project-link', name: 'ProjectLink', component: ProjectLink, meta: { title: '项目纳入及挂接' } },
       { path: 'dept/project-policy', name: 'ProjectPolicy', component: ProjectPolicy, meta: { title: '政策关联项目' } },
+      { path: 'dept/tpl-define',   name: 'TplDefine',   component: TplDefine,   meta: { title: '发放表定义' } },
       { path: 'dept/project-query',name: 'ProjectQuery',component: ProjectQuery,meta: { title: '补贴项目查询' } },
       { path: 'dept/notice',       name: 'Notice',      component: Notice,      meta: { title: '通知公告管理' } },
       { path: 'dept/policy',       name: 'Policy',      component: Policy,      meta: { title: '政策基础录入' } },

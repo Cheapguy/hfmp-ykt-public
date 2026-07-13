@@ -66,6 +66,8 @@ public class AuthorizationInterceptor implements HandlerInterceptor {
             Map.entry("/dept/notice",       new Rule(305, true)),
             Map.entry("/dept/batch",        new Rule(306, true)),
             Map.entry("/dept/correction",   new Rule(308, true)),
+            // 发放表定义：写操作须菜单 311（此前漏登记——启动自检 AuthCoverageCheck 就是防这种盲区的）
+            Map.entry("/dept/tpl",          new Rule(311, true)),
             // ===== 花名册 =====
             Map.entry("/roster",            new Rule(401, true)),
             // 编制花名册写接口：挂隐藏菜单 403(/roster/edit, VISIBLE=0)，migrate_21 授 role 2/7
@@ -74,6 +76,11 @@ public class AuthorizationInterceptor implements HandlerInterceptor {
             Map.entry("/pay/quota",         new Rule(501, true)),
             Map.entry("/pay/apply",         new Rule(502, true))
     );
+
+    /** 已登记的控制器基路径（供启动自检 {@link AuthCoverageCheck} 核对覆盖面）。 */
+    static Set<String> ruleBasePaths() {
+        return RULES.keySet();
+    }
 
     @Override
     public boolean preHandle(HttpServletRequest req, HttpServletResponse resp, Object handler) {

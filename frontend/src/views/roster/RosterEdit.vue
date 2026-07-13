@@ -9,7 +9,7 @@
       <el-button :disabled="locked" @click="openBatchEdit">批量修改</el-button>
       <el-button :disabled="locked" @click="doSubmit">送审</el-button>
       <el-button :disabled="!locked" @click="doUnsubmit">取消送审</el-button>
-      <el-button :disabled="isCorrection || locked" @click="triggerImport">导入</el-button>
+      <el-button :disabled="isCorrection || locked" @click="openImport">导入</el-button>
       <el-button @click="doExport">导出</el-button>
       <el-button :disabled="isCorrection || locked" @click="doDeleteBatch">删除批次</el-button>
       <el-button :disabled="locked" @click="doStop">停发</el-button>
@@ -45,39 +45,22 @@
     <!-- 数据列表 -->
     <el-card shadow="never">
       <div class="list-bar">数据列表</div>
-      <el-table v-loading="loading" :data="rows" border stripe size="small" row-key="id"
+      <!-- :key=列集合签名：模板列异步变化且新列插在中间时，el-table 表头列注册会错乱（体对头不对），整表重建最稳 -->
+      <el-table :key="colsSig" v-loading="loading" :data="rows" border stripe size="small" row-key="id"
         @selection-change="onSelect" height="56vh">
         <el-table-column type="selection" width="42" reserve-selection />
         <el-table-column type="index" label="序号" width="60" align="center" />
         <el-table-column prop="sortNo" label="排序序号" width="90" align="center" />
         <el-table-column prop="payStatus" label="支付状态" width="90" align="center" />
-        <el-table-column label="户主信息" align="center">
-          <el-table-column prop="holderName" label="户主姓名" width="90" />
-          <el-table-column prop="holderIdCard" label="户主身份证号" width="170" />
-        </el-table-column>
-        <el-table-column label="收款人信息" align="center">
-          <el-table-column prop="payeeName" label="收款人姓名" width="90" />
-          <el-table-column prop="payeeIdCard" label="收款人身份证号" width="170" />
-          <el-table-column prop="bankAccount" label="银行账号" width="180" />
-          <el-table-column prop="bankName" label="开户银行" width="200" show-overflow-tooltip />
-        </el-table-column>
-        <el-table-column label="补贴对象信息" align="center">
-          <el-table-column prop="villageName" label="村(居)委会" width="140" show-overflow-tooltip />
-          <el-table-column prop="groupName" label="村(居)民小组" width="110" />
-          <el-table-column prop="beneficiaryName" label="享受人" width="90" />
-          <el-table-column prop="beneficiaryIdCard" label="享受人身份证号" width="170" />
-          <el-table-column prop="phone" label="联系电话" width="120" />
-          <el-table-column prop="age" label="年龄" width="64" align="center" />
-        </el-table-column>
-        <el-table-column label="发放信息" align="center">
-          <el-table-column prop="standard" label="补贴标准" width="100" align="right">
-            <template #default="{ row }">{{ money(row.standard) }}</template>
+        <!-- 大列组整表按发放表定义驱动：组内列顺序 = 模板排序号（自由列可插到内置列之间） -->
+        <template v-for="g in gridGroups" :key="g.key">
+          <el-table-column v-if="g.cols.length" :label="g.label" align="center">
+            <el-table-column v-for="c in g.cols" :key="c.key" :label="c.label"
+              :width="c.width" :align="c.align || 'left'" show-overflow-tooltip>
+              <template #default="{ row }">{{ cellVal(row, c) }}</template>
+            </el-table-column>
           </el-table-column>
-          <el-table-column prop="amount" label="补贴金额" width="110" align="right">
-            <template #default="{ row }">{{ row.payStatus === '已停发' ? money(0) : money(row.amount) }}</template>
-          </el-table-column>
-          <el-table-column prop="fillDate" label="填报日期" width="120" align="center" />
-        </el-table-column>
+        </template>
         <el-table-column label="备注信息" width="160" show-overflow-tooltip>
           <template #default="{ row }">
             <span v-if="row.payStatus === '已停发'" style="color:#f56c6c">停发：{{ row.stopReason }}</span>
@@ -160,7 +143,9 @@
         <el-table-column prop="beneficiaryName" label="享受人" width="90" />
         <el-table-column prop="beneficiaryIdCard" label="享受人身份证号" width="170" />
         <el-table-column prop="bankAccount" label="银行账号" width="180" />
-        <el-table-column prop="bankName" label="开户银行" width="200" show-overflow-tooltip />
+        <el-table-column prop="bankName" label="开户银行" width="260" show-overflow-tooltip>
+          <template #default="{ row }">{{ bankDisp(row.bankName) }}</template>
+        </el-table-column>
         <el-table-column prop="villageName" label="村(居)委会" width="140" show-overflow-tooltip />
         <el-table-column prop="groupName" label="村(居)民小组" width="110" />
         <el-table-column prop="phone" label="联系电话" width="120" />
@@ -190,6 +175,31 @@
         <el-button type="primary" :loading="batchSaving" @click="saveBatch">保存全部</el-button>
         <el-button @click="batchVisible = false">取消</el-button>
       </template>
+    </el-dialog>
+
+    <!-- 导入选项（对齐生产：选文件 + 导出模板 / 导入 / 取消） -->
+    <el-dialog v-model="importVisible" title="导入选项" width="520px">
+      <div class="import-row">
+        <el-input :model-value="importFile ? importFile.name : ''" placeholder="请选择需要导入的文件..." readonly />
+        <el-button @click="fileInput?.click()">浏览...</el-button>
+      </div>
+      <template #footer>
+        <el-button @click="downloadTemplate">导出模板</el-button>
+        <el-button type="primary" :loading="importing" @click="doImport">导 入</el-button>
+        <el-button @click="importVisible = false">取 消</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 信息校验日志（导入前置校验 / 送审校验共用） -->
+    <el-dialog v-model="logVisible" title="信息校验日志" width="72%" top="6vh">
+      <div class="log-bar">
+        <el-button size="small" round @click="exportLog">导出日志信息</el-button>
+        <el-button size="small" round @click="logVisible = false">关闭</el-button>
+      </div>
+      <el-table :data="logRows" border stripe size="small" height="56vh">
+        <el-table-column type="index" label="序号" width="60" align="center" />
+        <el-table-column prop="msg" label="信息校验结果" min-width="500" show-overflow-tooltip />
+      </el-table>
     </el-dialog>
 
     <!-- 发放金额合计及批次备注 -->
@@ -252,6 +262,69 @@ async function loadBatchVillages() {
   const info = await rosterEditApi.info(batchId.value)
   batchTownId.value = info?.townId || null
   villages.value = (await villageApi.list(batchTownId.value ? { townId: batchTownId.value } : {})) || []
+  // 项目发放表定义的全部模板列（绑定+自由），数据列表整表按它渲染
+  try {
+    const cols = await rosterEditApi.tplCols(batchId.value)
+    tplGridCols.value = cols && cols.length ? cols : FALLBACK_COLS
+  } catch { tplGridCols.value = FALLBACK_COLS }
+}
+
+// ---- 数据列表按发放表定义整表驱动 ----
+const GROUP_ORDER = [
+  ['HOLDER', '户主信息'], ['PAYEE', '收款人信息'],
+  ['BENEFICIARY', '补贴对象信息'], ['GRANT', '发放信息'], ['EXT', '扩展信息']
+]
+// 绑定列的展示参数（宽度/对齐）；自由列统一 120
+const BIND_META = {
+  holderName: { width: 90 }, holderIdCard: { width: 170 },
+  payeeName: { width: 90 }, payeeIdCard: { width: 170 }, bankAccount: { width: 180 }, bankName: { width: 260 },
+  villageName: { width: 140 }, groupName: { width: 110 }, beneficiaryName: { width: 90 },
+  beneficiaryIdCard: { width: 170 }, phone: { width: 120 },
+  standard: { width: 100, align: 'right' }, amount: { width: 110, align: 'right' },
+  fillDate: { width: 120, align: 'center' }
+}
+// tpl-cols 拉不到时的兜底：默认 18 列布局（与内置默认模板一致）
+const FALLBACK_COLS = [
+  ['holderName', '户主姓名'], ['holderIdCard', '户主身份证号'], ['payeeName', '收款人姓名'],
+  ['payeeIdCard', '收款人身份证号'], ['bankAccount', '银行账号'], ['bankName', '开户银行'],
+  ['villageName', '村(居)委会'], ['groupName', '村(居)民小组'], ['beneficiaryName', '享受人'],
+  ['beneficiaryIdCard', '享受人身份证号'], ['phone', '联系电话'],
+  ['workPlace', '务工地点', 'EXT'], ['transport', '乘坐交通工具', 'EXT'],
+  ['standard', '补贴标准'], ['amount', '补贴金额'], ['fillDate', '填报日期']
+].map(([k, label, g]) => ({ key: k, label, bind: g ? '' : k, group: g || bindGroupOf(k) }))
+function bindGroupOf(b) {
+  if (b === 'holderName' || b === 'holderIdCard') return 'HOLDER'
+  if (['payeeName', 'payeeIdCard', 'bankAccount', 'bankName'].includes(b)) return 'PAYEE'
+  if (['villageName', 'groupName', 'beneficiaryName', 'beneficiaryIdCard', 'phone'].includes(b)) return 'BENEFICIARY'
+  return 'GRANT'
+}
+const tplGridCols = ref(FALLBACK_COLS)
+const colsSig = computed(() => tplGridCols.value.map(c => c.key).join('|'))
+const gridGroups = computed(() => GROUP_ORDER.map(([key, label]) => {
+  const cols = tplGridCols.value.filter(c => c.group === key)
+    .map(c => ({ ...c, width: 120, ...(BIND_META[c.bind] || {}) }))
+  if (key === 'BENEFICIARY' && cols.length) cols.push({ key: '__age', label: '年龄', bind: 'age', width: 64, align: 'center' })
+  return { key, label, cols }
+}))
+function cellVal(row, c) {
+  const b = c.bind
+  if (!b) return extVal(row, c.key)
+  if (b === 'bankName') return bankDisp(row.bankName)
+  if (b === 'standard') return money(row.standard)
+  if (b === 'amount') return row.payStatus === '已停发' ? money(0) : money(row.amount)
+  return row[b] ?? ''
+}
+function extVal(row, key) {
+  if (!row.extJson) return ''
+  try { return (JSON.parse(row.extJson) || {})[key] ?? '' } catch { return '' }
+}
+// 开户银行按生产口径显示「联行号-名称」（库里仍只存名称，导入/编辑不受影响）
+const bankNoMap = computed(() => Object.fromEntries(
+  banks.value.map(b => [b.bankName, b.unionCode || b.bankCode || ''])))
+function bankDisp(name) {
+  if (!name) return ''
+  const no = bankNoMap.value[name]
+  return no ? `${no}-${name}` : name
 }
 
 function onBatchChange() { page.pageNum = 1; loadBatchVillages(); reload() }
@@ -349,7 +422,16 @@ async function saveBatch() {
 }
 
 // 送审 / 取消 / 停发 / 删除批次
-async function doSubmit() { if (!needBatch()) return; await rosterEditApi.submit(batchId.value); ElMessage.success('已送审'); refreshBatches() }
+async function doSubmit() {
+  if (!needBatch()) return
+  const res = await rosterEditApi.submit(batchId.value)
+  if (res && res.ok === false) {
+    // 与补贴对象基础库不一致：弹「信息校验日志」，修改一致后方可送审
+    showLog(res.errors || [])
+    return
+  }
+  ElMessage.success('已送审'); refreshBatches()
+}
 async function doUnsubmit() { if (!needBatch()) return; await rosterEditApi.unsubmit(batchId.value); ElMessage.success('已取消送审'); refreshBatches() }
 async function doStop() {
   if (!needSelected()) return
@@ -368,14 +450,57 @@ async function doDeleteBatch() {
 }
 async function refreshBatches() { batchOptions.value = (await rosterEditApi.pending()) || [] }
 
-// 导入 / 导出
+// 导入（导入选项弹窗：导出模板 / 选文件 / 前置校验）
 const fileInput = ref(null)
-function triggerImport() { if (!needBatch()) return; fileInput.value?.click() }
-async function onFileChange(e) {
-  const file = e.target.files?.[0]; if (!file) return
-  const fd = new FormData(); fd.append('file', file)
-  try { const n = await rosterEditApi.importExcel(batchId.value, fd); ElMessage.success(`导入 ${n ?? 0} 条`); reload() }
-  finally { e.target.value = '' }
+const importVisible = ref(false); const importing = ref(false)
+const importFile = ref(null)
+function openImport() {
+  if (!needBatch()) return
+  importFile.value = null
+  importVisible.value = true
+}
+function onFileChange(e) {
+  importFile.value = e.target.files?.[0] || null
+  e.target.value = ''
+}
+async function downloadTemplate() {
+  if (!needBatch()) return   // 模板列按批次所属项目的发放表定义生成
+  const blob = await rosterEditApi.template(batchId.value)
+  saveBlob(blob, '清册导入模板.xls')
+}
+async function doImport() {
+  if (!importFile.value) return ElMessage.warning('请先选择需要导入的文件')
+  importing.value = true
+  try {
+    const fd = new FormData(); fd.append('file', importFile.value)
+    const res = await rosterEditApi.importExcel(batchId.value, fd)
+    if (res && res.errors && res.errors.length) {
+      // 前置校验不通过：整体不导入，弹「信息校验日志」
+      showLog(res.errors)
+      return
+    }
+    ElMessage.success(`导入 ${res?.count ?? 0} 条`)
+    importVisible.value = false; importFile.value = null
+    reload()
+  } finally { importing.value = false }
+}
+
+// 信息校验日志（导入 / 送审共用）
+const logVisible = ref(false); const logRows = ref([])
+function showLog(errors) {
+  logRows.value = (errors || []).map(msg => ({ msg }))
+  logVisible.value = true
+}
+function exportLog() {
+  const text = logRows.value.map((r, i) => `${i + 1}\t${r.msg}`).join('\r\n')
+  // ﻿ BOM：让 Excel/记事本按 UTF-8 识别中文
+  saveBlob(new Blob(['﻿序号\t信息校验结果\r\n' + text], { type: 'text/plain;charset=utf-8' }), '信息校验日志.txt')
+}
+
+function saveBlob(blob, filename) {
+  const url = URL.createObjectURL(blob); const a = document.createElement('a')
+  a.href = url; a.download = filename; document.body.appendChild(a); a.click()
+  document.body.removeChild(a); URL.revokeObjectURL(url)
 }
 async function doExport() {
   if (!needBatch()) return
@@ -412,4 +537,6 @@ function money(v) { return v == null ? '' : Number(v).toLocaleString('zh-CN', { 
 .fill-search { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; margin-bottom: 12px; }
 .fill-search .sf > label { width: auto; }
 .req { color: #f56c6c; margin-right: 2px; }
+.import-row { display: flex; gap: 8px; align-items: center; }
+.log-bar { margin-bottom: 10px; }
 </style>

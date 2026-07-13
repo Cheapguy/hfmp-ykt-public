@@ -37,7 +37,11 @@ export const beneficiaryApi = {
   ...makeCrud('/setup/beneficiary'),
   refer:    (idCard) => request.get('/setup/beneficiary/refer', { params: { idCard } }),
   cancel:   (id) => request.post(`/setup/beneficiary/${id}/cancel`),
-  uncancel: (id) => request.post(`/setup/beneficiary/${id}/uncancel`)
+  uncancel: (id) => request.post(`/setup/beneficiary/${id}/uncancel`),
+  importTemplate: () => request.get('/setup/beneficiary/import-template', { responseType: 'blob' }),
+  importFile: (formData) => request.post('/setup/beneficiary/import', formData, { headers: { 'Content-Type': 'multipart/form-data' } }),
+  exportAll: () => request.get('/setup/beneficiary/export', { responseType: 'blob' }),
+  relations: () => request.get('/setup/beneficiary/relations')
 }
 
 // ===== 主管部门 =====
@@ -70,6 +74,17 @@ export const noticeApi = {
 export const policyApi = {
   ...makeCrud('/dept/policy'),
   discard: (id) => request.post(`/dept/policy/${id}/discard`)
+}
+// 发放表定义：项目级清册导入模板列定义（固定列锁死，自由列可增删改/绑定）
+export const tplApi = {
+  items:       (projectId) => request.get('/dept/tpl/items', { params: { projectId } }),
+  bindOptions: () => request.get('/dept/tpl/bind-options'),
+  init:        (projectId) => request.post('/dept/tpl/init', null, { params: { projectId } }),
+  reset:       (projectId) => request.post('/dept/tpl/reset', null, { params: { projectId } }),
+  saveItem:    (data) => request.post('/dept/tpl/item', data),
+  deleteItem:  (id) => request.delete(`/dept/tpl/item/${id}`),
+  move:        (id, dir) => request.post('/dept/tpl/move', null, { params: { id, dir } }),
+  copy:        (fromProjectId, toProjectId, overwrite) => request.post('/dept/tpl/copy', null, { params: { fromProjectId, toProjectId, overwrite: overwrite ? 1 : 0 } })
 }
 // 政策关联项目：项目树 + 已关联政策 + 候选政策弹窗 + 关联/取消关联
 export const projectPolicyApi = {
@@ -168,6 +183,8 @@ export const rosterEditApi = {
   deleteBatch:(batchId) => request.delete(`/dept/roster/batch/${batchId}`),
   summary:    (batchId) => request.get(`/dept/roster/${batchId}/summary`),
   importExcel:(batchId, formData) => request.post('/dept/roster/import', formData, { params: { batchId }, headers: { 'Content-Type': 'multipart/form-data' } }),
+  template:   (batchId) => request.get('/dept/roster/template', { params: { batchId }, responseType: 'blob' }),
+  tplCols:    (batchId) => request.get(`/dept/roster/${batchId}/tpl-cols`),
   exportUrl:  (batchIds) => request.get('/dept/query/roster/export', { params: { batchIds }, responseType: 'blob' })
 }
 

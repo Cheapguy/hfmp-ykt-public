@@ -42,6 +42,7 @@ public class YktNoticeController extends BaseCrudController<YktNoticeMapper, Ykt
     private final YktAgencyMapper agencyMapper;
     private final SysUserMapper userMapper;
     private final SysOrgMapper orgMapper;
+    private final com.bosi.ykt.security.DataScopeResolver dataScope;
 
     @Value("${ykt.upload.base-dir}")
     private String baseDir;
@@ -140,13 +141,10 @@ public class YktNoticeController extends BaseCrudController<YktNoticeMapper, Ykt
     }
 
     /** 当前用户所属县码：org.orgCode 前 6 位（如 990003010000 → 990003），取不到返回 null=全部县 */
+    /** 以数据范围为准：ALL → null(全部县)；否则 DataScope 县码（同批次下达口径，防管理员机构码误落某县） */
     private String currentCounty() {
-        Long uid = UserContext.currentUserId();
-        SysUser u = uid == null ? null : userMapper.selectById(uid);
-        if (u == null || u.getOrgId() == null) return null;
-        SysOrg org = orgMapper.selectById(u.getOrgId());
-        if (org == null || org.getOrgCode() == null || org.getOrgCode().length() < 6) return null;
-        return org.getOrgCode().substring(0, 6);
+        com.bosi.ykt.security.DataScopeResolver.Ctx c = dataScope.current();
+        return c.scope == com.bosi.ykt.security.DataScopeResolver.Scope.ALL ? null : c.countyCode;
     }
 
     @Data

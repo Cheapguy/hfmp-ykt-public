@@ -55,4 +55,6 @@ public class YktGrantDetail extends BaseEntity {
     private Integer retryTimes;
     /** 停发原因（编制阶段对明细停发时必填；停发明细不发起支付，银行环节归退款） */
     private String stopReason;
+    /** 发放表定义自由列的值（JSON：{itemKey: 值}，来自清册导入未绑定明细字段的列） */
+    private String extJson;
 }

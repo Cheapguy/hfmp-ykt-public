@@ -140,6 +140,17 @@ public class DataScopeResolver {
         w.apply(townCol + " " + townInCond(c));
     }
 
+    /**
+     * 放宽到「本县所有乡镇」的过滤（跨乡镇引用等县内共享场景）：OWN_ORG 也放到县，跨县仍拦。
+     * 子查询按县码前缀取乡镇，OWN_ORG 无需预取 countyTownIds；deny 态县码 000000 → 恒空集。
+     */
+    public void applyCountyTown(AbstractWrapper<?, ?, ?> w, String townCol) {
+        Ctx c = current();
+        if (c.scope == Scope.ALL) return;
+        w.apply(townCol + " IN (SELECT ID FROM SYS_ORG WHERE ORG_TYPE = 'TOWN' AND ORG_CODE LIKE '"
+                + c.countyCode + "%')");
+    }
+
     /** 经 batchId 子查询过滤（YKT_GRANT_DETAIL / YKT_ROSTER，本表无 townId）。 */
     public void applyBatchTown(AbstractWrapper<?, ?, ?> w, String batchIdCol) {
         Ctx c = current();

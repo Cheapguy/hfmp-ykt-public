@@ -1,12 +1,15 @@
 package com.bosi.ykt.controller;
 
 import com.alibaba.excel.EasyExcel;
+import com.alibaba.excel.support.ExcelTypeEnum;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.bosi.ykt.common.BizException;
+import com.bosi.ykt.common.FormulaEngine;
 import com.bosi.ykt.common.R;
-import com.bosi.ykt.controller.dto.GrantDetailExport;
+import com.bosi.ykt.common.TplService;
+import jakarta.servlet.http.HttpServletResponse;
 import com.bosi.ykt.entity.*;
 import com.bosi.ykt.mapper.*;
 import com.bosi.ykt.security.UserContext;
@@ -36,6 +39,7 @@ public class YktRosterEditController {
     private final YktAuditLogMapper auditLogMapper;
     private final SysUserMapper userMapper;
     private final com.bosi.ykt.security.DataScopeResolver dataScope;
+    private final TplService tplService;
 
     private Long tid() { return UserContext.currentTenantId(); }
 
@@ -384,11 +388,15 @@ public class YktRosterEditController {
         return R.ok(n);
     }
 
-    /** 乡镇经办岗送审：补贴对象库一致性校验通过后 ISSUED -> SUBMITTED，进入乡镇审核岗(TOWN_AUDIT) */
+    /**
+     * 乡镇经办岗送审：补贴对象库一致性校验通过后 ISSUED -> SUBMITTED，进入乡镇审核岗(TOWN_AUDIT)。
+     * 校验不过时返回 {ok:false, errors:[...]} 给前端「信息校验日志」弹窗展示，批次状态不动。
+     */
     @PostMapping("/{batchId}/submit")
-    public R<Void> submit(@PathVariable Long batchId) {
+    public R<Map<String, Object>> submit(@PathVariable Long batchId) {
         assertScope(batchId);
-        validateForSubmit(batchId);          // 校验失败抛 BizException，停留花名册维护
+        List<String> errs = validateForSubmit(batchId);
+        if (!errs.isEmpty()) return R.ok(Map.of("ok", false, "errors", errs));
         refreshBatchTotals(batchId);
         // 条件更新：仅已下达(ISSUED)批次可送审，0 行=状态已变更（并发/越权直连）
         int r = batchMapper.update(null, new com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper<YktBatch>()
@@ -397,20 +405,26 @@ public class YktRosterEditController {
         if (r == 0) throw new BizException("仅已下达待编制的批次可送审（状态已变更，请刷新）");
         // 流程进度：乡镇录入 --送审--> 乡镇审核
         writeAuditLog(batchId, "乡镇录入", "审核", "送审", "", "乡镇审核");
-        return R.ok();
+        return R.ok(Map.of("ok", true));
     }
 
+    private static String nz(String s) { return s == null ? "" : s.trim(); }
+    private static boolean same(String a, String b) { return nz(a).equals(nz(b)); }
+
     /**
-     * 送审校验（对齐省厅流程「补贴送审校验」）：逐条与补贴对象库比对 享受人身份证/姓名/村组，
-     * 校验失败汇总前 15 条抛出，乡镇修正后方可送审。
-     * 注：社保卡校验项预留——当前补贴对象库社保卡数据为空，启用会误堵全部送审，待数据补齐后开启。
+     * 送审校验（对齐生产「信息校验日志」口径）：逐条按享受人身份证回查补贴对象库，比对三组信息——
+     * ① 户主姓名/户主身份证号 ↔ 库 headName/headIdCard；
+     * ② 收款人姓名/收款人身份证号/银行账号 ↔ 库 accountName(缺省成员姓名)/idCard/bankAccount；
+     * ③ 享受人姓名+身份证 在库中存在且一致。
+     * 村(居)民小组只要求非空不比对；全部一致方可送审。返回错误行（空=通过）。
      */
-    private void validateForSubmit(Long batchId) {
-        List<YktGrantDetail> details = grantMapper.selectList(scope().eq("BATCH_ID", batchId));
+    private List<String> validateForSubmit(Long batchId) {
+        QueryWrapper<YktGrantDetail> dw = scope().eq("BATCH_ID", batchId).orderByAsc("SORT_NO");
+        List<YktGrantDetail> details = grantMapper.selectList(dw);
         if (details.isEmpty()) throw new BizException("花名册为空，无法送审");
 
         Long t = tid();
-        // 只查本批次明细涉及的身份证（≤1000 一组分批 IN），不再把全州对象库载入内存
+        // 只查本批次明细涉及的身份证（≤1000 一组分批 IN），不把全州对象库载入内存
         List<String> idcs = details.stream()
                 .map(YktGrantDetail::getBeneficiaryIdCard)
                 .filter(Objects::nonNull).map(String::trim).filter(s -> !s.isEmpty())
@@ -423,40 +437,35 @@ public class YktRosterEditController {
             for (YktBeneficiary p : beneficiaryMapper.selectList(bw))
                 if (p.getIdCard() != null) lib.put(p.getIdCard().trim(), p);
         }
-        // 村组名只查命中对象涉及的 id
-        Map<Long, String> villageName = new HashMap<>();
-        List<Long> vids = lib.values().stream().map(YktBeneficiary::getVillageId)
-                .filter(Objects::nonNull).distinct().toList();
-        for (int i = 0; i < vids.size(); i += 1000)
-            villageMapper.selectBatchIds(vids.subList(i, Math.min(i + 1000, vids.size())))
-                    .forEach(v -> villageName.put(v.getId(), v.getVillageName()));
 
         List<String> errs = new ArrayList<>();
-        int row = 0;
         for (YktGrantDetail d : details) {
-            row++;
-            String idc = d.getBeneficiaryIdCard() == null ? "" : d.getBeneficiaryIdCard().trim();
-            String who = (d.getBeneficiaryName() == null || d.getBeneficiaryName().isBlank())
-                    ? ("第" + row + "行") : d.getBeneficiaryName().trim();
-            if (idc.isEmpty()) { errs.add("第" + row + "行 " + who + "：享受人身份证为空"); }
-            else {
-                YktBeneficiary p = lib.get(idc);
-                if (p == null) { errs.add(who + "(" + idc + ")：不在补贴对象库"); }
-                else {
-                    String nm = d.getBeneficiaryName() == null ? "" : d.getBeneficiaryName().trim();
-                    String libNm = p.getName() == null ? "" : p.getName().trim();
-                    if (!nm.isEmpty() && !libNm.isEmpty() && !nm.equals(libNm))
-                        errs.add(who + "(" + idc + ")：姓名与对象库不一致[应为" + libNm + "]");
-                    String vn = d.getVillageName() == null ? "" : d.getVillageName().trim();
-                    String libVn = p.getVillageId() == null ? "" : villageName.getOrDefault(p.getVillageId(), "").trim();
-                    if (!vn.isEmpty() && !libVn.isEmpty() && !vn.equals(libVn))
-                        errs.add(who + "(" + idc + ")：村组与对象库不一致[应为" + libVn + "]");
-                }
+            String idc = nz(d.getBeneficiaryIdCard());
+            String name = nz(d.getBeneficiaryName());
+            String head = "排序序号:" + (d.getSortNo() == null ? "" : d.getSortNo())
+                    + " 享受人身份证号码：" + idc + " 享受人姓名：" + name + " ";
+            if (nz(d.getGroupName()).isEmpty())
+                errs.add(head + "村(居)民小组为空，请核对！");
+            YktBeneficiary p = idc.isEmpty() ? null : lib.get(idc);
+            if (p == null) {
+                // 库里查无此人：户主/收款账户自然也对不上，按生产口径三条一起报
+                errs.add(head + "对应的户主信息与补贴对象基础库信息不一致！");
+                errs.add(head + "对应收款账户信息与补贴对象基础库信息不一致！");
+                errs.add(head + "在补贴对象基础库信息缺失或者不一致！");
+            } else {
+                if (!same(d.getHolderName(), p.getHeadName()) || !same(d.getHolderIdCard(), p.getHeadIdCard()))
+                    errs.add(head + "对应的户主信息与补贴对象基础库信息不一致！");
+                String libPayee = p.getAccountName() != null && !p.getAccountName().isBlank()
+                        ? p.getAccountName() : p.getName();
+                if (!same(d.getPayeeName(), libPayee) || !same(d.getPayeeIdCard(), p.getIdCard())
+                        || !same(d.getBankAccount(), p.getBankAccount()))
+                    errs.add(head + "对应收款账户信息与补贴对象基础库信息不一致！");
+                if (!same(name, p.getName()))
+                    errs.add(head + "在补贴对象基础库信息缺失或者不一致！");
             }
-            if (errs.size() >= 15) break;
+            if (errs.size() >= 500) break;   // 护住弹窗与响应体，前 500 条足够定位
         }
-        if (!errs.isEmpty())
-            throw new BizException("送审校验未通过，请修正后再送审（前" + errs.size() + "条）：\n" + String.join("\n", errs));
+        return errs;
     }
 
     /** 取消送审：SUBMITTED+TOWN_AUDIT -> ISSUED（仅刚送审、还没被乡镇审核经手的批次可撤回） */
@@ -543,42 +552,288 @@ public class YktRosterEditController {
         return R.ok(m);
     }
 
-    /** 导入花名册（Excel，列与导出一致） */
+    /** 导出清册导入模板（.xls，仅表头）。列来自项目的发放表定义（无自定义回落默认 18 列）。 */
+    @GetMapping("/template")
+    public void template(@RequestParam(required = false) Long batchId, HttpServletResponse resp) throws Exception {
+        List<YktTplItem> cols;
+        if (batchId != null) {
+            YktBatch b = batchMapper.selectById(batchId);
+            if (b == null) throw new BizException("批次不存在");
+            cols = tplService.columnsOf(b.getProjectId());
+        } else {
+            cols = com.bosi.ykt.common.TplService.defaults();
+        }
+        resp.setContentType("application/vnd.ms-excel");
+        resp.setCharacterEncoding("utf-8");
+        String fileName = java.net.URLEncoder.encode("清册导入模板", java.nio.charset.StandardCharsets.UTF_8);
+        resp.setHeader("Content-disposition", "attachment;filename*=utf-8''" + fileName + ".xls");
+        List<List<String>> head = cols.stream().map(c -> List.of(c.getItemLabel())).toList();
+        EasyExcel.write(resp.getOutputStream()).head(head)
+                .excelType(ExcelTypeEnum.XLS).sheet("清册").doWrite(List.of());
+    }
+
+    /**
+     * 批次项目的模板列（绑定列 + 自由列，模板 SORT_NO 序），清册表格整表据此动态渲染：
+     * 组内列顺序 = 排序号顺序（自由列可插到内置列之间）。sortNo/remark 绑定列不返回（网格有固定位置）。
+     */
+    @GetMapping("/{batchId}/tpl-cols")
+    public R<List<Map<String, String>>> tplCols(@PathVariable Long batchId) {
+        YktBatch b = batchMapper.selectById(batchId);
+        if (b == null) throw new BizException("批次不存在");
+        List<Map<String, String>> l = new ArrayList<>();
+        for (YktTplItem c : tplService.columnsOf(b.getProjectId())) {
+            String bind = nz(c.getBindField());
+            String group = bind.isEmpty()
+                    ? (nz(c.getColGroup()).isEmpty() ? "EXT" : c.getColGroup())
+                    : TplService.BIND_GROUPS.get(bind);
+            if (group == null) continue;
+            l.add(Map.of("key", c.getItemKey(), "label", c.getItemLabel(), "group", group, "bind", bind));
+        }
+        return R.ok(l);
+    }
+
+    /** 金额/数值格式：数字、最多两位小数（负数/文本/千分位/三位小数一律不过） */
+    private static final java.util.regex.Pattern AMOUNT_FMT = java.util.regex.Pattern.compile("^\\d{1,10}(\\.\\d{1,2})?$");
+    /** 整数格式 */
+    private static final java.util.regex.Pattern INT_FMT = java.util.regex.Pattern.compile("^\\d{1,10}$");
+    private static final com.fasterxml.jackson.databind.ObjectMapper JSON = new com.fasterxml.jackson.databind.ObjectMapper();
+
+    /**
+     * 清册导入（对齐生产「导入选项」）。列按项目发放表定义动态解析，前置校验任一条不过则整体不导入，
+     * 错误按「信息校验日志」逐行返回：
+     * ① 表头须与项目当前模板一致；② 必填列非空；③ 按列数据类型校验（身份证 18 位 / 整数 / 金额两位小数 / 日期）；
+     * ④ 绑定 开户银行 的列须与系统银行设置全称一致；⑤ 绑定 村(居)委会 的列须与本乡镇村组维护全称一致。
+     * 绑定明细字段的列落 YKT_GRANT_DETAIL 对应字段；未绑定的自由列（如 务工地点）校验后存 EXT_JSON。
+     * 人员信息与补贴对象库的一致性仍留在送审阶段校验。
+     */
     @PostMapping("/import")
-    public R<Integer> importExcel(@RequestParam Long batchId, @RequestParam("file") MultipartFile file) throws Exception {
+    public R<Map<String, Object>> importExcel(@RequestParam Long batchId, @RequestParam("file") MultipartFile file) throws Exception {
         assertScope(batchId);
         requireEditable(batchId);
         YktBatch batch = batchMapper.selectById(batchId);
-        List<GrantDetailExport> rows = EasyExcel.read(file.getInputStream())
-                .head(GrantDetailExport.class).sheet().doReadSync();
+        List<YktTplItem> cols = tplService.columnsOf(batch.getProjectId());
+
+        // headRowNumber(0)：首行为表头一并读入，值为 Map<列号, 单元格文本>
+        List<Map<Integer, String>> raw = EasyExcel.read(file.getInputStream())
+                .sheet().headRowNumber(0).doReadSync();
+        if (raw.isEmpty()) throw new BizException("导入文件无有效数据行");
+
+        // 表头须与项目当前模板逐列一致（防拿旧模板/别的项目模板导入错位）
+        Map<Integer, String> hdr = raw.get(0);
+        for (int i = 0; i < cols.size(); i++) {
+            String h = nz(hdr.get(i));
+            if (!h.equals(cols.get(i).getItemLabel()))
+                return R.ok(Map.of("count", 0, "errors", List.of(
+                        "导入文件表头与当前项目模板不一致（第" + (i + 1) + "列应为「" + cols.get(i).getItemLabel()
+                                + "」，实际为「" + h + "」），请先导出最新模板后按模板填报！")));
+        }
+
+        // 剔除整行全空（Excel 尾部常见幽灵空行）；行号=在 raw 中的下标+1（表头占第 1 行）
+        List<int[]> dataIdx = new ArrayList<>();   // [rawIndex]
+        for (int i = 1; i < raw.size(); i++) {
+            Map<Integer, String> row = raw.get(i);
+            boolean blank = true;
+            for (int c = 0; c < cols.size() && blank; c++)
+                if (!nz(row.get(c)).isEmpty()) blank = false;
+            if (!blank) dataIdx.add(new int[]{i});
+        }
+        if (dataIdx.isEmpty()) throw new BizException("导入文件无有效数据行");
+
+        // 系统字典：开户银行全称 / 本批次乡镇的村(居)委会全称
+        Set<String> bankNames = new HashSet<>();
+        bankMapper.selectList(null).forEach(b -> { if (b.getBankName() != null) bankNames.add(b.getBankName().trim()); });
+        QueryWrapper<YktVillage> vw = new QueryWrapper<>();
+        if (batch != null && batch.getTownId() != null) vw.eq("TOWN_ID", batch.getTownId());
+        Set<String> villageNames = new HashSet<>();
+        villageMapper.selectList(vw).forEach(v -> { if (v.getVillageName() != null) villageNames.add(v.getVillageName().trim()); });
+
+        // 公式列取操作数用：标识 -> 列号 / 列定义
+        Map<String, Integer> idxByKey = new HashMap<>();
+        Map<String, YktTplItem> colByKey = new HashMap<>();
+        for (int c = 0; c < cols.size(); c++) {
+            idxByKey.put(cols.get(c).getItemKey(), c);
+            colByKey.put(cols.get(c).getItemKey(), cols.get(c));
+        }
+
+        List<String> errs = new ArrayList<>();
+        for (int[] ix : dataIdx) {
+            int rowNo = ix[0] + 1;   // Excel 显示行号
+            Map<Integer, String> row = raw.get(ix[0]);
+            for (int c = 0; c < cols.size(); c++) {
+                YktTplItem col = cols.get(c);
+                if (col.getFormula() != null && !col.getFormula().isEmpty()) {
+                    // 公式列（清册样式公式）：单元格内容忽略，由系统按公式计算；此处校验该行能否算出
+                    evalFormula(col, row, colByKey, idxByKey, rowNo, errs);
+                    continue;
+                }
+                String v = nz(row.get(c));
+                if (v.isEmpty()) {
+                    if (Integer.valueOf(1).equals(col.getRequiredFlag()))
+                        errs.add("Excel行号：" + rowNo + "，填报的数据中存在为空的必填项（" + col.getItemLabel() + "），请核对！");
+                    continue;
+                }
+                switch (nz(col.getColType())) {
+                    case "idcard" -> {
+                        if (v.length() != 18)
+                            errs.add("Excel行号：" + rowNo + " " + idcardLabel(col) + "：" + v + " ，位数(" + v.length() + ")错误，请核对！");
+                    }
+                    case "int" -> {
+                        if (!INT_FMT.matcher(v).matches())
+                            errs.add("Excel行号：" + rowNo + " " + col.getItemLabel() + "：" + v + " 必须为整数，请核对！");
+                    }
+                    case "decimal" -> {
+                        if (!AMOUNT_FMT.matcher(v).matches())
+                            errs.add("Excel行号：" + rowNo + " " + col.getItemLabel() + "：" + v + " 金额格式错误（须为数字，最多两位小数），请核对！");
+                    }
+                    case "date" -> {
+                        if (parseDateOrNull(v) == null)
+                            errs.add("Excel行号：" + rowNo + " " + col.getItemLabel() + "：" + v + " 日期格式错误（示例：2026-01-01），请核对！");
+                    }
+                    case "enum" -> {
+                        // 枚举列（对生产“引用数据类型=枚举”）：值必须在发放表定义的允许值内
+                        String ev = nz(col.getEnumValues());
+                        if (!ev.isEmpty() && !Arrays.asList(ev.split(",")).contains(v))
+                            errs.add("Excel行号：" + rowNo + " " + col.getItemLabel() + "：" + v
+                                    + " 不在系统设置的允许值范围（" + ev.replace(",", "/") + "）内，请核对！");
+                    }
+                    default -> { }
+                }
+                String bind = nz(col.getBindField());
+                if ("bankName".equals(bind) && !bankNames.contains(v))
+                    errs.add("Excel行号：" + rowNo + " 开户银行名称：" + v + " 与系统设置的不符，请核对！");
+                if ("villageName".equals(bind) && !villageNames.contains(v))
+                    errs.add("Excel行号：" + rowNo + " 村(居)委会：" + v + " 与系统中村(居)委会的全称不符，请核对！");
+            }
+            if (errs.size() >= 500) break;
+        }
+        if (!errs.isEmpty()) return R.ok(Map.of("count", 0, "errors", errs));
+
         int seq = nextSortNo(batchId);
         int n = 0;
-        for (GrantDetailExport e : rows) {
+        for (int[] ix : dataIdx) {
+            Map<Integer, String> row = raw.get(ix[0]);
             YktGrantDetail d = new YktGrantDetail();
             d.setBatchId(batchId);
             d.setBatchCode(batch == null ? null : batch.getBatchCode());
-            d.setSortNo(seq++);
-            d.setPayStatus(e.getPayStatus() != null ? e.getPayStatus() : "已申请");
-            d.setHolderName(e.getHolderName());
-            d.setHolderIdCard(e.getHolderIdCard());
-            d.setPayeeName(e.getPayeeName());
-            d.setPayeeIdCard(e.getPayeeIdCard());
-            d.setBankAccount(e.getBankAccount());
-            d.setBankName(e.getBankName());
-            d.setVillageName(e.getVillageName());
-            d.setGroupName(e.getGroupName());
-            d.setBeneficiaryName(e.getBeneficiaryName());
-            d.setBeneficiaryIdCard(e.getBeneficiaryIdCard());
-            d.setPhone(e.getPhone());
-            d.setResidence(e.getResidence());
-            d.setAge(e.getAge());
-            d.setAmount(e.getAmount());
-            d.setFillDate(LocalDate.now());
+            d.setPayStatus("已申请");
+            Map<String, String> ext = new LinkedHashMap<>();
+            Integer sn = null;
+            for (int c = 0; c < cols.size(); c++) {
+                YktTplItem col = cols.get(c);
+                if (col.getFormula() != null && !col.getFormula().isEmpty()) {
+                    // 公式列按行计算（公式仅数值列可设，可绑定的只有 sortNo/standard/amount）
+                    BigDecimal fv = evalFormula(col, row, colByKey, idxByKey, 0, null);
+                    String fb = nz(col.getBindField());
+                    if (fb.isEmpty()) {
+                        if (fv != null) ext.put(col.getItemKey(), fv.toPlainString());
+                    } else switch (fb) {
+                        case "sortNo" -> sn = fv == null ? sn : fv.intValue();
+                        case "standard" -> d.setStandard(fv);
+                        case "amount" -> d.setAmount(fv);
+                        default -> { }
+                    }
+                    continue;
+                }
+                String v = nz(row.get(c));
+                String bind = nz(col.getBindField());
+                if (bind.isEmpty()) {
+                    if (!v.isEmpty()) ext.put(col.getItemKey(), v);
+                    continue;
+                }
+                switch (bind) {
+                    case "sortNo" -> sn = parseInt(v);
+                    case "holderName" -> d.setHolderName(v);
+                    case "holderIdCard" -> d.setHolderIdCard(v);
+                    case "payeeName" -> d.setPayeeName(v);
+                    case "payeeIdCard" -> d.setPayeeIdCard(v);
+                    case "bankAccount" -> d.setBankAccount(v);
+                    case "bankName" -> d.setBankName(v);
+                    case "villageName" -> d.setVillageName(v);
+                    case "groupName" -> d.setGroupName(v);
+                    case "beneficiaryName" -> d.setBeneficiaryName(v);
+                    case "beneficiaryIdCard" -> d.setBeneficiaryIdCard(v);
+                    case "phone" -> d.setPhone(v);
+                    case "standard" -> d.setStandard(parseMoney(v));
+                    case "amount" -> d.setAmount(parseMoney(v));
+                    case "fillDate" -> d.setFillDate(parseDate(v));
+                    case "remark" -> d.setRemark(v);
+                    default -> { }
+                }
+            }
+            d.setSortNo(sn != null ? sn : seq++);
+            if (d.getFillDate() == null) d.setFillDate(LocalDate.now());
+            if (!ext.isEmpty()) d.setExtJson(JSON.writeValueAsString(ext));
             grantMapper.insert(d);
             n++;
         }
         refreshBatchTotals(batchId);
-        return R.ok(n);
+        return R.ok(Map.of("count", n, "errors", List.of()));
+    }
+
+    /**
+     * 公式列按行取值：操作数取同一行其他列的单元格。操作数为空 → 返回 null（该公式列必填时写错误）；
+     * 操作数格式错误由其自身列的类型校验报错，此处静默跳过防重复报。整数列四舍五入，金额列保留两位。
+     */
+    private static BigDecimal evalFormula(YktTplItem col, Map<Integer, String> row,
+                                          Map<String, YktTplItem> colByKey, Map<String, Integer> idxByKey,
+                                          int rowNo, List<String> errOut) {
+        try {
+            Map<String, BigDecimal> vars = new HashMap<>();
+            for (String k : FormulaEngine.refs(col.getFormula())) {
+                String v = nz(row.get(idxByKey.get(k)));
+                if (v.isEmpty()) {
+                    if (errOut != null && Integer.valueOf(1).equals(col.getRequiredFlag())) {
+                        YktTplItem rc = colByKey.get(k);
+                        errOut.add("Excel行号：" + rowNo + " " + col.getItemLabel() + " 按公式（" + col.getFormula()
+                                + "）计算时「" + (rc == null ? k : rc.getItemLabel()) + "」为空，请核对！");
+                    }
+                    return null;
+                }
+                try { vars.put(k, new BigDecimal(v)); }
+                catch (NumberFormatException e) { return null; }
+            }
+            BigDecimal r = FormulaEngine.eval(col.getFormula(), vars);
+            return "int".equals(col.getColType())
+                    ? r.setScale(0, java.math.RoundingMode.HALF_UP)
+                    : r.setScale(2, java.math.RoundingMode.HALF_UP);
+        } catch (ArithmeticException e) {
+            if (errOut != null)
+                errOut.add("Excel行号：" + rowNo + " " + col.getItemLabel() + " 公式（" + col.getFormula()
+                        + "）计算出错（除数为0），请核对！");
+            return null;
+        }
+    }
+
+    /** 身份证列错误文案标签：三个核心证件列沿用生产原文（收款人/享受人带“码”字），自由列用列名 */
+    private static String idcardLabel(YktTplItem col) {
+        return switch (nz(col.getBindField())) {
+            case "holderIdCard" -> "户主身份证号";
+            case "payeeIdCard" -> "收款人身份证号码";
+            case "beneficiaryIdCard" -> "享受人身份证号码";
+            default -> col.getItemLabel();
+        };
+    }
+
+    private static Integer parseInt(String s) {
+        try { return nz(s).isEmpty() ? null : new BigDecimal(nz(s)).intValueExact(); }
+        catch (Exception ex) { return null; }
+    }
+
+    private static BigDecimal parseMoney(String s) {
+        try { return nz(s).isEmpty() ? null : new BigDecimal(nz(s)); }
+        catch (Exception ex) { return null; }
+    }
+
+    private static LocalDate parseDate(String s) {
+        LocalDate d = parseDateOrNull(s);
+        return d != null ? d : LocalDate.now();
+    }
+
+    /** 宽松归一（斜杠/年月日 → ISO）后解析，失败返回 null（供 date 列前置校验） */
+    private static LocalDate parseDateOrNull(String s) {
+        String v = nz(s).replace('/', '-').replace("年", "-").replace("月", "-").replace("日", "");
+        if (v.isEmpty()) return null;
+        try { return LocalDate.parse(v); } catch (Exception ex) { return null; }
     }
 
     /** 只查这批人涉及的村组名（≤1000 一组分批），不整表载入 */
