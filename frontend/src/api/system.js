@@ -31,7 +31,12 @@ export const userRoleApi = {
 }
 
 // ===== 系统设置 =====
-export const bankApi    = makeCrud('/setup/bank')
+export const bankApi    = {
+  ...makeCrud('/setup/bank'),
+  // 全国联行号库 1.7 万行：下拉走远程搜索、列表回显走批量解析，不再整表下发
+  search:  (kw) => request.get('/setup/bank/page', { params: { kw: kw || '', pageNum: 1, pageSize: 50 } }),
+  resolve: (params) => request.get('/setup/bank/resolve', { params })
+}
 export const villageApi = makeCrud('/setup/village')
 export const beneficiaryApi = {
   ...makeCrud('/setup/beneficiary'),
@@ -168,7 +173,7 @@ export const queryApi = {
 
 // ===== 编制花名册 =====
 export const rosterEditApi = {
-  pending:    () => request.get('/dept/roster/pending'),
+  pending:    (params) => request.get('/dept/roster/pending', { params }),
   info:       (batchId) => request.get(`/dept/roster/${batchId}/info`),
   page:       (params) => request.get('/dept/roster/page', { params }),
   save:       (data) => request.post('/dept/roster', data),
@@ -201,7 +206,14 @@ export const reportApi = {
   detail:      (params) => request.get('/report/detail', { params }),
   project:     (params) => request.get('/report/project', { params }),
   deptProject: (params) => request.get('/report/dept-project', { params }),
-  usage:       (params) => request.get('/report/usage', { params })
+  usage:       (params) => request.get('/report/usage', { params }),
+  // 财政端 4 张报表
+  projectStat: (params) => request.get('/report/project-stat', { params }),
+  countyStat:  (params) => request.get('/report/county-stat', { params }),
+  std51:       (params) => request.get('/report/std51', { params }),
+  std51Items:  () => request.get('/report/std51/items'),
+  selfProject: (params) => request.get('/report/self-project', { params }),
+  counties:    () => request.get('/report/counties')
 }
 
 // ===== 工作台 =====

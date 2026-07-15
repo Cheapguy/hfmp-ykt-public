@@ -105,12 +105,18 @@ public class YktRosterEditController {
         requireEditable(d.getBatchId());
     }
 
-    /** 首页：待编制花名册列表（仅已下达 status=ISSUED；未下达批次不展示），带项目名 + 标签 */
+    /** 首页：待编制花名册列表（仅已下达 status=ISSUED；未下达批次不展示），带项目名 + 标签。
+     *  projectCode：补贴录入子项菜单(/entry/{code})按项目编码过滤本子项的批次。 */
     @GetMapping("/pending")
-    public R<List<Map<String, Object>>> pending() {
+    public R<List<Map<String, Object>>> pending(@RequestParam(required = false) String projectCode) {
         QueryWrapper<YktBatch> w = new QueryWrapper<>();
         Long t = tid();
         if (t != null) w.eq("TENANT_ID", t);
+        if (projectCode != null && !projectCode.isBlank()) {
+            // 菜单码为纯数字；白名单校验后才拼入子查询，防注入
+            if (!projectCode.matches("\\d{1,12}")) throw new BizException("项目编码不合法");
+            w.inSql("PROJECT_ID", "SELECT ID FROM YKT_PROJECT WHERE PROJECT_CODE='" + projectCode + "'");
+        }
         // 已下达(可编制) + 刚送审待乡镇审核(SUBMITTED@TOWN_AUDIT，供锁定展示/取消送审)；
         // 过了乡镇审核的批次不再归编制岗，故不含更后阶段。
         w.and(x -> x.eq("STATUS", "ISSUED")
@@ -295,9 +301,21 @@ public class YktRosterEditController {
         return R.ok(n);
     }
 
+    /** 表单保存口径与导入一致：身份证必须 18 位（导入路径在模板校验里做，这里管住单条/批量修改） */
+    private void checkIdCards(YktGrantDetail d) {
+        checkIdCard("户主身份证号", d.getHolderIdCard());
+        checkIdCard("收款人身份证号码", d.getPayeeIdCard());
+        checkIdCard("享受人身份证号码", d.getBeneficiaryIdCard());
+    }
+    private void checkIdCard(String label, String v) {
+        if (v != null && !v.isBlank() && v.trim().length() != 18)
+            throw new BizException(label + "：" + v.trim() + " ，位数(" + v.trim().length() + ")错误，请核对！");
+    }
+
     /** 新增/修改一条 */
     @PostMapping
     public R<Void> save(@RequestBody YktGrantDetail d) {
+        checkIdCards(d);
         if (d.getId() == null) {
             assertScope(d.getBatchId());
             requireEditable(d.getBatchId());
@@ -318,7 +336,7 @@ public class YktRosterEditController {
     @PostMapping("/batch-save")
     public R<Integer> batchSave(@RequestBody List<YktGrantDetail> list) {
         int n = 0;
-        for (YktGrantDetail d : list) if (d.getId() != null) { assertDetailScope(d.getId()); requireDetailEditable(d.getId()); n += grantMapper.updateById(d); }
+        for (YktGrantDetail d : list) if (d.getId() != null) { checkIdCards(d); assertDetailScope(d.getId()); requireDetailEditable(d.getId()); n += grantMapper.updateById(d); }
         return R.ok(n);
     }
 
@@ -414,7 +432,7 @@ public class YktRosterEditController {
     /**
      * 送审校验（对齐生产「信息校验日志」口径）：逐条按享受人身份证回查补贴对象库，比对三组信息——
      * ① 户主姓名/户主身份证号 ↔ 库 headName/headIdCard；
-     * ② 收款人姓名/收款人身份证号/银行账号 ↔ 库 accountName(缺省成员姓名)/idCard/bankAccount；
+     * ② 收款人姓名/收款人身份证号/银行账号/开户银行 ↔ 库 accountName(缺省成员姓名)/idCard/bankAccount/bankId→名称；
      * ③ 享受人姓名+身份证 在库中存在且一致。
      * 村(居)民小组只要求非空不比对；全部一致方可送审。返回错误行（空=通过）。
      */
@@ -438,6 +456,13 @@ public class YktRosterEditController {
                 if (p.getIdCard() != null) lib.put(p.getIdCard().trim(), p);
         }
 
+        // 库存 bankId，清册存银行名称：只解析本批次涉及对象引用的 bankId（全国联行号库 1.7 万行，不整表载入）
+        Map<Long, String> bankNames = new HashMap<>();
+        List<Long> bids = lib.values().stream().map(YktBeneficiary::getBankId)
+                .filter(Objects::nonNull).distinct().toList();
+        if (!bids.isEmpty())
+            for (YktBank b : bankMapper.selectBatchIds(bids)) bankNames.put(b.getId(), b.getBankName());
+
         List<String> errs = new ArrayList<>();
         for (YktGrantDetail d : details) {
             String idc = nz(d.getBeneficiaryIdCard());
@@ -457,8 +482,10 @@ public class YktRosterEditController {
                     errs.add(head + "对应的户主信息与补贴对象基础库信息不一致！");
                 String libPayee = p.getAccountName() != null && !p.getAccountName().isBlank()
                         ? p.getAccountName() : p.getName();
+                String libBank = p.getBankId() == null ? "" : nz(bankNames.get(p.getBankId()));
                 if (!same(d.getPayeeName(), libPayee) || !same(d.getPayeeIdCard(), p.getIdCard())
-                        || !same(d.getBankAccount(), p.getBankAccount()))
+                        || !same(d.getBankAccount(), p.getBankAccount())
+                        || !same(d.getBankName(), libBank))
                     errs.add(head + "对应收款账户信息与补贴对象基础库信息不一致！");
                 if (!same(name, p.getName()))
                     errs.add(head + "在补贴对象基础库信息缺失或者不一致！");

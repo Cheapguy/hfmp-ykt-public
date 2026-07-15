@@ -5,7 +5,7 @@
       selectable :page-size="200" :page-sizes="[100, 200, 500, 1000]"
       collapsible-search :search-cols="4" list-title="数据列表" enable-view-toggle :card-fields="cardFields"
       :enable-create="false" :enable-edit="false" :enable-delete="false"
-      @selection-change="sel = $event">
+      @selection-change="sel = $event" @loaded="onListLoaded">
       <!-- 工具条对齐生产 -->
       <template #toolbar-left>
         <el-button type="primary" :icon="Plus" @click="crud.openForm()">新增</el-button>
@@ -41,13 +41,15 @@
         </el-select>
       </template>
       <template #form-bankId="{ form }">
-        <el-select v-model="form.bankId" filterable clearable placeholder="选择开户银行" style="width:100%">
-          <el-option v-for="b in banks" :key="b.id" :label="bankLabel(b)" :value="b.id" />
+        <el-select v-model="form.bankId" filterable remote clearable :remote-method="searchBanks" :loading="bankLoading"
+          placeholder="输入行号/名称搜索开户银行" style="width:100%">
+          <el-option v-for="o in bankOpts" :key="o.value" :label="o.label" :value="o.value" />
         </el-select>
       </template>
       <template #form-publicBankId="{ form }">
-        <el-select v-model="form.publicBankId" filterable clearable placeholder="选择公共账户开户行" style="width:100%">
-          <el-option v-for="b in banks" :key="b.id" :label="bankLabel(b)" :value="b.id" />
+        <el-select v-model="form.publicBankId" filterable remote clearable :remote-method="searchBanks" :loading="bankLoading"
+          placeholder="输入行号/名称搜索公共账户开户行" style="width:100%">
+          <el-option v-for="o in bankOpts" :key="o.value" :label="o.label" :value="o.value" />
         </el-select>
       </template>
     </CrudTable>
@@ -107,7 +109,11 @@
         <el-table-column type="index" label="序号" width="60" align="center" />
         <el-table-column v-for="col in batchColumns" :key="col.prop" :label="col.label" :width="col.width">
           <template #default="{ row }">
-            <el-select v-if="col.type === 'select'" v-model="row[col.prop]" filterable clearable size="small" style="width:100%">
+            <el-select v-if="col.prop === 'bankId' || col.prop === 'publicBankId'" v-model="row[col.prop]"
+              filterable remote clearable :remote-method="searchBanks" :loading="bankLoading" size="small" style="width:100%">
+              <el-option v-for="o in bankOpts" :key="o.value" :label="o.label" :value="o.value" />
+            </el-select>
+            <el-select v-else-if="col.type === 'select'" v-model="row[col.prop]" filterable clearable size="small" style="width:100%">
               <el-option v-for="o in optsFor(col.prop)" :key="o.value" :label="o.label" :value="o.value" />
             </el-select>
             <el-input-number v-else-if="col.type === 'number'" v-model="row[col.prop]" :min="0" :max="130" :controls="false" size="small" style="width:100%" />
@@ -141,19 +147,37 @@ const labelOf = (opts, v) => opts.find(o => o.value === String(v))?.label || v |
 const statusTag = (v) => ({ '0': 'info', '1': 'success', '2': 'warning' }[String(v)] || 'info')
 
 /* ============ 下拉数据源 ============ */
-const towns = ref([]); const villages = ref([]); const banks = ref([])
-const bankLabel = (b) => b.bankCode ? `${b.bankCode}-${b.bankName}` : b.bankName
+const towns = ref([]); const villages = ref([])
+// 对齐生产口径「联行号-名称」（402836505018-xx联社）；无联行号回落 bankCode，再没有只显名称
+const bankLabel = (b) => { const no = b.unionCode || b.bankCode; return no ? `${no}-${b.bankName}` : b.bankName }
 const villageName = (id) => { const v = villages.value.find(x => String(x.id) === String(id)); return v ? `${v.villageCode}-${v.villageName}` : '-' }
-const bankNameById = (id) => { const b = banks.value.find(x => String(x.id) === String(id)); return b ? bankLabel(b) : '' }
+
+/* 全国联行号库 1.7 万行：不整表下发。bankCache 缓存已知银行（列表回显 + 搜索结果），
+   bankOpts 由缓存派生（体量=屏上引用+最近搜索，几十到几百条），下拉走远程搜索 searchBanks。 */
+const bankCache = reactive({})
+const bankLoading = ref(false)
+const mergeBanks = (arr) => (arr || []).forEach(b => { if (b && b.id != null) bankCache[String(b.id)] = b })
+const bankNameById = (id) => { const b = bankCache[String(id)]; return b ? bankLabel(b) : (id ? String(id) : '') }
+const bankOpts = computed(() => Object.values(bankCache).map(b => ({ label: bankLabel(b), value: b.id })))
+async function searchBanks(kw) {
+  if (!kw || !kw.trim()) return
+  bankLoading.value = true
+  try { mergeBanks((await bankApi.search(kw.trim()))?.records) } finally { bankLoading.value = false }
+}
+// 列表加载后：把本页引用到的开户行/公共账户开户行批量解析进缓存，供回显
+async function resolveListBanks(rows) {
+  const ids = [...new Set(rows.flatMap(r => [r.bankId, r.publicBankId])
+    .filter(v => v != null && !bankCache[String(v)]).map(String))]
+  if (ids.length) mergeBanks(await bankApi.resolve({ ids: ids.join(',') }))
+}
+function onListLoaded({ rows }) { resolveListBanks(rows || []) }
 const villageOpts = computed(() => villages.value.map(v => ({ label: `${v.villageCode}-${v.villageName}`, value: v.id })))
-const bankOpts = computed(() => banks.value.map(b => ({ label: bankLabel(b), value: b.id })))
 const setOpt = (prop, opts) => { const f = searchFields.find(x => x.prop === prop); if (f) f.options = opts }
 onMounted(async () => {
   const all = (await orgApi.tree()) || []
   const cMap = Object.fromEntries(all.filter(o => o.orgType === 'COUNTY').map(c => [String(c.id), c.orgName]))
   towns.value = all.filter(o => o.orgType === 'TOWN')
   villages.value = (await villageApi.list({})) || []
-  banks.value = (await bankApi.list({})) || []
   setOpt('townId', towns.value.map(t => ({ label: `${cMap[String(t.parentId)] || ''} ${t.orgName}`, value: t.id })))
   setOpt('villageId', villages.value.map(v => ({ label: `${v.villageCode}-${v.villageName}`, value: v.id })))
 })

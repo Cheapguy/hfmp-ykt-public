@@ -43,6 +43,10 @@ const ReportDetail  = () => import('../views/report/ReportDetail.vue')
 const ReportProject = () => import('../views/report/ReportProject.vue')
 const ReportDeptProject = () => import('../views/report/ReportDeptProject.vue')
 const ReportUsage   = () => import('../views/report/ReportUsage.vue')
+const ReportProjectStat  = () => import('../views/report/ReportProjectStat.vue')
+const ReportCountyStat   = () => import('../views/report/ReportCountyStat.vue')
+const ReportStd51        = () => import('../views/report/ReportStd51.vue')
+const ReportSelfProject  = () => import('../views/report/ReportSelfProject.vue')
 // 集中支付
 const Quota   = () => import('../views/pay/Quota.vue')
 const Apply   = () => import('../views/pay/Apply.vue')
@@ -80,12 +84,19 @@ const routes = [
       { path: 'dept/correction',   name: 'Correction',  component: Correction,  meta: { title: '更正发放' } },
       { path: 'roster/fill',       name: 'RosterFill',  component: Roster,      meta: { title: '花名册填报' } },
       { path: 'roster/edit',       name: 'RosterEdit',  component: RosterEdit,  meta: { title: '编制花名册' } },
+      // 补贴录入子项（55项国标菜单 /entry/{code}）：复用编制花名册页，按项目编码过滤批次；
+      // 不设 meta.title，标签页标题回落到菜单名（如「2082102-农村分散供养特困人员供养金」）
+      { path: 'entry/:code(\\d+)', name: 'GrantEntry',  component: RosterEdit },
       { path: 'roster/audit',      name: 'RosterAudit', component: Roster,      meta: { title: '花名册审核' } },
       { path: 'report/dept-project',name: 'ReportDeptProject', component: ReportDeptProject, meta: { title: '部门项目发放情况查询' } },
       { path: 'report/person',     name: 'ReportPerson', component: ReportPerson,  meta: { title: '乡镇发放情况个人查询' } },
       { path: 'report/detail',     name: 'ReportDetail', component: ReportDetail,  meta: { title: '乡镇发放情况明细查询' } },
       { path: 'report/project',    name: 'ReportProject',component: ReportProject, meta: { title: '乡镇项目发放情况查询' } },
       { path: 'report/usage',      name: 'ReportUsage',  component: ReportUsage,   meta: { title: '惠民系统使用情况查询' } },
+      { path: 'report/project-stat', name: 'ReportProjectStat', component: ReportProjectStat, meta: { title: '分项目发放情况统计表' } },
+      { path: 'report/county-stat',  name: 'ReportCountyStat',  component: ReportCountyStat,  meta: { title: '分县区发放情况统计表' } },
+      { path: 'report/std51',        name: 'ReportStd51',       component: ReportStd51,       meta: { title: '51项补贴项目发放表' } },
+      { path: 'report/self-project', name: 'ReportSelfProject', component: ReportSelfProject, meta: { title: '补贴项目发放表(自设项目)' } },
       { path: 'pay/quota',         name: 'Quota',       component: Quota,       meta: { title: '项目额度挂接' } },
       { path: 'pay/apply',         name: 'Apply',       component: Apply,       meta: { title: '发起支付申请' } },
       { path: 'pay/submit',        name: 'PaySubmit',   component: PaySubmit,   meta: { title: '支付签章送审' } },

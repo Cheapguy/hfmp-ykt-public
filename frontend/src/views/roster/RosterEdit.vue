@@ -80,11 +80,12 @@
       <el-form :model="form" label-width="120px" class="single-grid">
         <el-form-item label="排序序号"><el-input v-model.number="form.sortNo" /></el-form-item>
         <el-form-item label="户主姓名" required><el-input v-model="form.holderName" /></el-form-item>
-        <el-form-item label="户主身份证号" required><el-input v-model="form.holderIdCard" /></el-form-item>
+        <el-form-item label="户主身份证号" required><el-input v-model="form.holderIdCard" maxlength="18" /></el-form-item>
         <el-form-item label="银行账号" required><el-input v-model="form.bankAccount" /></el-form-item>
         <el-form-item label="开户银行" required>
-          <el-select v-model="form.bankName" filterable allow-create default-first-option style="width:100%">
-            <el-option v-for="b in banks" :key="b.id" :label="b.bankName" :value="b.bankName" />
+          <el-select v-model="form.bankName" filterable remote allow-create default-first-option
+            :remote-method="searchBanks" :loading="bankLoading" placeholder="输入行号/名称搜索" style="width:100%">
+            <el-option v-for="o in bankSearchOpts" :key="o.name" :label="o.label" :value="o.name" />
           </el-select>
         </el-form-item>
         <el-form-item label="村(居)委会" required>
@@ -95,8 +96,8 @@
         <el-form-item label="村(居)民小组" required><el-input v-model="form.groupName" /></el-form-item>
         <el-form-item label="收款人姓名" required><el-input v-model="form.payeeName" /></el-form-item>
         <el-form-item label="享受人" required><el-input v-model="form.beneficiaryName" /></el-form-item>
-        <el-form-item label="收款人身份证" required><el-input v-model="form.payeeIdCard" /></el-form-item>
-        <el-form-item label="享受人身份证号" required><el-input v-model="form.beneficiaryIdCard" /></el-form-item>
+        <el-form-item label="收款人身份证" required><el-input v-model="form.payeeIdCard" maxlength="18" /></el-form-item>
+        <el-form-item label="享受人身份证号" required><el-input v-model="form.beneficiaryIdCard" maxlength="18" /></el-form-item>
         <el-form-item label="联系电话"><el-input v-model="form.phone" /></el-form-item>
         <el-form-item label="补助标准" required><el-input-number v-model="form.standard" :min="0" :precision="2" controls-position="right" style="width:100%" /></el-form-item>
         <el-form-item label="补贴金额" required><el-input-number v-model="form.amount" :min="0" :precision="2" controls-position="right" style="width:100%" /></el-form-item>
@@ -225,6 +226,12 @@ const STATUS = { NEW: '待编制', SUBMITTED: '已送审', STOP: '已停发', IS
 const statusLabel = (s) => STATUS[s] || s || ''
 
 const route = useRoute()
+// 补贴录入子项模式（/entry/{code}）：批次下拉只出本补贴项目的批次，且不自动选中（对齐生产，须先选批次）
+// setup 时该路由即当前激活页，取一次即可（keep-alive 每个标签一个实例）
+const stdCode = route.params.code || null
+// keep-alive 多开后本组件可能同时缓存多个实例（/roster/edit 与若干 /entry/*），
+// 记住本实例的路径，route 相关 watcher 只响应发给自己的导航，防别的标签跳转串改本页批次
+const ownPath = route.path
 const batchId = ref(null)
 const batchOptions = ref([])
 const batchTownId = ref(null)
@@ -233,7 +240,16 @@ const q = reactive({ holderName: '', holderIdCard: '', payeeName: '', payeeIdCar
 const rows = ref([]); const loading = ref(false)
 const selected = ref([])
 const page = reactive({ pageNum: 1, pageSize: 100, total: 0 })
-const banks = ref([]); const villages = ref([])
+// 全国联行号库 1.7 万行：不整表下发。花名册按名称存银行，bankCache 存 名称→行号（本页解析 + 搜索结果）
+const bankCache = reactive({}); const bankLoading = ref(false); const villages = ref([])
+const mergeBankNames = (arr) => (arr || []).forEach(b => { if (b && b.bankName) bankCache[b.bankName] = b.unionCode || b.bankCode || '' })
+async function searchBanks(kw) {
+  if (!kw || !kw.trim()) return
+  bankLoading.value = true
+  try { mergeBankNames((await bankApi.search(kw.trim()))?.records) } finally { bankLoading.value = false }
+}
+const bankSearchOpts = computed(() => Object.keys(bankCache).map(name => ({
+  name, label: bankCache[name] ? `${bankCache[name]}-${name}` : name })))
 
 const currentBatch = computed(() => batchOptions.value.find(x => String(x.id) === String(batchId.value)))
 // 更正发放（重构）批次：人员固定复制而来，禁止新增/批量填报/导入/删除批次
@@ -244,7 +260,6 @@ const locked = computed(() => currentBatch.value?.status === 'SUBMITTED')
 onMounted(async () => {
   await refreshBatches()
   towns.value = ((await orgApi.tree()) || []).filter(o => o.orgType === 'TOWN')
-  banks.value = (await bankApi.list({})) || []
   const qid = route.query.batchId
   if (qid) {
     batchId.value = String(qid)
@@ -252,13 +267,16 @@ onMounted(async () => {
       const info = await rosterEditApi.info(batchId.value)
       if (info && info.id) batchOptions.value.unshift(info)
     }
-  } else if (batchOptions.value.length) batchId.value = String(batchOptions.value[0].id)
+  } else if (!stdCode && batchOptions.value.length) batchId.value = String(batchOptions.value[0].id)
   await loadBatchVillages()
   reload()
 })
-watch(() => route.query.batchId, (v) => { if (v) { batchId.value = String(v); loadBatchVillages(); reload() } })
+watch(() => route.query.batchId, (v) => {
+  if (v && route.path === ownPath) { batchId.value = String(v); loadBatchVillages(); reload() }
+})
 
 async function loadBatchVillages() {
+  if (!batchId.value) { batchTownId.value = null; villages.value = []; tplGridCols.value = FALLBACK_COLS; return }
   const info = await rosterEditApi.info(batchId.value)
   batchTownId.value = info?.townId || null
   villages.value = (await villageApi.list(batchTownId.value ? { townId: batchTownId.value } : {})) || []
@@ -318,13 +336,16 @@ function extVal(row, key) {
   if (!row.extJson) return ''
   try { return (JSON.parse(row.extJson) || {})[key] ?? '' } catch { return '' }
 }
-// 开户银行按生产口径显示「联行号-名称」（库里仍只存名称，导入/编辑不受影响）
-const bankNoMap = computed(() => Object.fromEntries(
-  banks.value.map(b => [b.bankName, b.unionCode || b.bankCode || ''])))
+// 开户银行按生产口径显示「联行号-名称」（花名册库里仍只存名称，导入/编辑不受影响）
 function bankDisp(name) {
   if (!name) return ''
-  const no = bankNoMap.value[name]
+  const no = bankCache[name]
   return no ? `${no}-${name}` : name
+}
+// 本页明细里出现的银行名称，批量解析行号进缓存供「联行号-名称」显示
+async function resolveRowBanks(list) {
+  const names = [...new Set((list || []).map(r => r.bankName).filter(n => n && !(n in bankCache)))]
+  if (names.length) mergeBankNames(await bankApi.resolve({ names: names.join(',') }))
 }
 
 function onBatchChange() { page.pageNum = 1; loadBatchVillages(); reload() }
@@ -335,6 +356,7 @@ async function reload() {
     const res = await rosterEditApi.page({ batchId: batchId.value, ...filterParams(), pageNum: page.pageNum, pageSize: page.pageSize })
     rows.value = res?.records || []
     page.total = Number(res?.total) || 0
+    resolveRowBanks(rows.value)
   } finally { loading.value = false }
 }
 function filterParams() {
@@ -351,15 +373,23 @@ const singleVisible = ref(false)
 const blank = () => ({ id: null, sortNo: null, holderName: '', holderIdCard: '', payeeName: '', payeeIdCard: '', bankAccount: '', bankName: '', villageName: '', groupName: '', beneficiaryName: '', beneficiaryIdCard: '', phone: '', age: null, standard: null, amount: null, fillDate: null, remark: '' })
 const form = reactive(blank())
 function openSingle(row) {
+  // 新增须先选批次（对齐生产「请选择批次!」）；修改传入行则不查
+  if (!(row && row.id) && !needBatch()) return
   Object.assign(form, blank(), row && row.id ? row : {})
   singleVisible.value = true
 }
+// reserve-selection 跨 reload 保留的是旧行对象，编辑前按 id 换成当前页的最新数据，否则保存后再改弹出的是旧值
+function freshRow(r) { return rows.value.find(x => x.id === r.id) || r }
 function editSelected() {
   if (!needSelected()) return
   if (selected.value.length > 1) return ElMessage.warning('修改只能选一条')
-  openSingle(selected.value[0])
+  openSingle(freshRow(selected.value[0]))
 }
 async function saveSingle(keep) {
+  for (const [k, label] of [['holderIdCard', '户主身份证号'], ['payeeIdCard', '收款人身份证'], ['beneficiaryIdCard', '享受人身份证号']]) {
+    const v = (form[k] || '').trim()
+    if (v && v.length !== 18) return ElMessage.warning(`${label}须为 18 位，当前 ${v.length} 位`)
+  }
   await rosterEditApi.save({ ...form, batchId: batchId.value })
   ElMessage.success('保存成功')
   if (keep) { Object.assign(form, blank()) } else { singleVisible.value = false }
@@ -412,7 +442,7 @@ async function doFillSave() {
 const batchVisible = ref(false); const batchSaving = ref(false); const batchRows = ref([])
 function openBatchEdit() {
   if (!needSelected()) return
-  batchRows.value = selected.value.map(r => ({ ...r }))
+  batchRows.value = selected.value.map(r => ({ ...freshRow(r) }))
   batchVisible.value = true
 }
 async function saveBatch() {
@@ -448,7 +478,7 @@ async function doDeleteBatch() {
   await rosterEditApi.deleteBatch(batchId.value)
   ElMessage.success('批次已删除'); batchId.value = null; rows.value = []; refreshBatches()
 }
-async function refreshBatches() { batchOptions.value = (await rosterEditApi.pending()) || [] }
+async function refreshBatches() { batchOptions.value = (await rosterEditApi.pending(stdCode ? { projectCode: stdCode } : undefined)) || [] }
 
 // 导入（导入选项弹窗：导出模板 / 选文件 / 前置校验）
 const fileInput = ref(null)
