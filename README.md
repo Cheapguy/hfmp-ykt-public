@@ -4,6 +4,18 @@
 
 技术栈：**Spring Boot 3 + MyBatis-Plus + Druid + Oracle 11g / Vue3 + Vite + Element-Plus**。
 
+**EN** — A fully-anonymized demo of a Chinese county-level **government subsidy disbursement platform** ("one-card" direct payment): subsidy project catalog, beneficiary registry, batch issuance, roster preparation, multi-level audit workflow, centralized treasury payment with fund reconciliation, and statistical reports. Backend: Spring Boot 3 / MyBatis-Plus / Oracle. Frontend: Vue 3 / Vite / Element Plus. All names, ID numbers, region codes and figures are fictional; a fresh database can be rebuilt from `schema.sql` + `seed.sql` alone.
+
+## 界面预览
+
+| 工作台 | 补贴录入（55 项国标菜单树） |
+|---|---|
+| ![工作台](docs/screenshots/dashboard.png) | ![补贴录入](docs/screenshots/entry-menu.png) |
+
+| 补贴对象维护 | 发放数据审核 |
+|---|---|
+| ![补贴对象维护](docs/screenshots/beneficiary.png) | ![发放数据审核](docs/screenshots/audit.png) |
+
 ## 目录
 ```
 hfmp-ykt/
