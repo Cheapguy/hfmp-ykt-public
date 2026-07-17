@@ -11,6 +11,7 @@
       <template v-else>
         <el-button type="primary" :icon="Select" @click="doApprove">审核</el-button>
         <el-button :icon="Back" @click="doReject">退回</el-button>
+        <el-button :icon="Ticket" @click="doTraceCode">核定追踪代码</el-button>
         <el-button :icon="Edit" @click="openEdit">修改</el-button>
       </template>
     </el-card>
@@ -55,6 +56,9 @@
         <el-table-column prop="deptName" label="业务处室" width="140" show-overflow-tooltip />
         <el-table-column prop="pivotOfficeName" label="归口处室" width="130" show-overflow-tooltip>
           <template #default="{ row }">{{ row.pivotOfficeName || '—' }}</template>
+        </el-table-column>
+        <el-table-column prop="traceCode" label="追踪代码" width="120" align="center">
+          <template #default="{ row }">{{ row.traceCode || '—' }}</template>
         </el-table-column>
         <el-table-column prop="competentDept" label="主管部门" width="160" show-overflow-tooltip />
         <el-table-column prop="grantType" label="发放类型" width="110" align="center" />
@@ -120,7 +124,7 @@
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Edit, Delete, Promotion, Select, Back } from '@element-plus/icons-vue'
+import { Plus, Edit, Delete, Promotion, Select, Back, Ticket } from '@element-plus/icons-vue'
 import { projectApi } from '../../api/system'
 import ProjectForm from './ProjectForm.vue'
 
@@ -183,21 +187,44 @@ async function doSubmit() {
   ElMessage.success('送审成功'); reload()
 }
 
-// ---- 审核：审核/退回（两段制：市州综合岗选归口处室 → 归口处室终审） ----
+// ---- 审核：5 棒（手册§七(一)3）----
+// COUNTY 县区财政局审核岗 → SZ 市州财政综合岗(选归口处室) → DEPT 省财政厅业务处室
+//   → AGRI 省财政厅农业处(终审+生成编码)
+const STAGE_TITLE = {
+  COUNTY: '县区财政局审核岗审核',
+  DEPT: '省财政厅业务处室审核',
+  AGRI: '省财政厅农业处审核（终审）'
+}
 async function doApprove() {
   if (!ensureSel()) return
   const stages = [...new Set(selected.value.map(r => r.auditStage))]
   if (stages.length > 1) { ElMessage.warning('选中项目处于不同审核阶段，请分别审核'); return }
   const stage = stages[0]
   if (stage === 'SZ') {
+    // 市州综合岗：须选定归口处室
     await openOfficeDialog()
-  } else if (stage === 'DEPT') {
-    const { value } = await ElMessageBox.prompt('审核意见', '归口处室审核（终审）', { inputValue: '同意', confirmButtonText: '确定终审' })
-    await projectApi.approve(selected.value.map(r => r.id), value)
-    ElMessage.success('终审成功，已生成项目编码'); reload()
-  } else {
-    ElMessage.warning('当前阶段无法审核')
+    return
   }
+  const title = STAGE_TITLE[stage]
+  if (!title) { ElMessage.warning('当前阶段无法审核'); return }
+  const isFinal = stage === 'AGRI'
+  const { value } = await ElMessageBox.prompt('审核意见', title,
+    { inputValue: '同意', confirmButtonText: isFinal ? '确定终审' : '通过' })
+  await projectApi.approve(selected.value.map(r => r.id), value)
+  ElMessage.success(isFinal ? '终审成功，已生成项目编码' : '审核通过'); reload()
+}
+
+// ---- 省财政厅信息处：核定追踪代码（对已终审项目）----
+async function doTraceCode() {
+  if (!ensureSel()) return
+  if (selected.value.some(r => r.auditStatus !== 'APPROVED')) {
+    ElMessage.warning('仅可对已终审项目核定追踪代码'); return
+  }
+  const { value } = await ElMessageBox.prompt('追踪代码（字母/数字/下划线/连字符，≤64位）', '核定追踪代码',
+    { inputPlaceholder: '省财政厅信息处核定', confirmButtonText: '确定核定',
+      inputPattern: /^[0-9A-Za-z_-]{1,64}$/, inputErrorMessage: '格式不合法' })
+  await projectApi.traceCode(selected.value.map(r => r.id), value)
+  ElMessage.success('追踪代码已核定'); reload()
 }
 
 // ---- 市州综合岗：选定归口处室 ----
@@ -210,7 +237,7 @@ async function confirmOffice() {
   if (!officePick.value) { ElMessage.warning('请选择归口处室'); return }
   await projectApi.approve(selected.value.map(r => r.id), officeOpinion.value,
     officePick.value.officeCode, officePick.value.officeName)
-  ElMessage.success('审核通过，已转交归口处室'); officeVisible.value = false; reload()
+  ElMessage.success('审核通过，已转交省财政厅业务处室'); officeVisible.value = false; reload()
 }
 async function doReject() {
   if (!ensureSel()) return

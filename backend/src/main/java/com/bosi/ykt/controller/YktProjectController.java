@@ -7,12 +7,14 @@ import com.bosi.ykt.common.BizException;
 import com.bosi.ykt.common.R;
 import com.bosi.ykt.entity.SysOrg;
 import com.bosi.ykt.entity.SysUser;
+import com.bosi.ykt.entity.SysUserRole;
 import com.bosi.ykt.entity.YktCentralProject;
 import com.bosi.ykt.entity.YktOffice;
 import com.bosi.ykt.entity.YktProject;
 import com.bosi.ykt.entity.YktProjectAuditLog;
 import com.bosi.ykt.mapper.SysOrgMapper;
 import com.bosi.ykt.mapper.SysUserMapper;
+import com.bosi.ykt.mapper.SysUserRoleMapper;
 import com.bosi.ykt.mapper.YktCentralProjectMapper;
 import com.bosi.ykt.mapper.YktOfficeMapper;
 import com.bosi.ykt.mapper.YktProjectAuditLogMapper;
@@ -34,11 +36,20 @@ import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
  * 补贴项目维护 + 审核 + 纳入及挂接。手册 §七
- * 录入岗 --送审--> 审核岗 --审核(终审,自动生成项目编码)--> 结束；退回回到录入岗。
+ *
+ * <p>审核链按手册 §七(一)3「县（区）自建项目流程」的 5 棒实现：
+ * <pre>
+ * 县区财政局录入(ENTRY) --送审--> 县区财政局审核岗(COUNTY) --> 市州财政综合岗(SZ，选定归口处室)
+ *   --> 省财政厅业务处室(DEPT) --> 省财政厅农业处(AGRI，终审+自动生成项目编码) --> 完成(DONE)
+ *      ⇢ 省财政厅信息处核定追踪代码（虚线旁支，不阻断流程）
+ * </pre>
+ * 退回一律回到录入岗；撤销送审仅在下一岗(县审核岗)未审时可用（手册 §七(三)2）。
+ * 每棒都做岗位校验（{@link #assertStageRole}），审核页「待审核」只列本岗那一棒（{@link #applyStageScope}）。
  * 维护页(forAudit=false)与审核页(forAudit=true)共用本控制器，按 tab 过滤。
  */
 @RestController
@@ -48,6 +59,7 @@ public class YktProjectController extends BaseCrudController<YktProjectMapper, Y
     private final YktProjectMapper mapper;
     private final YktProjectAuditLogMapper logMapper;
     private final SysUserMapper userMapper;
+    private final SysUserRoleMapper userRoleMapper;
     private final SysOrgMapper orgMapper;
     private final YktCentralProjectMapper centralMapper;
     private final YktOfficeMapper officeMapper;
@@ -55,6 +67,31 @@ public class YktProjectController extends BaseCrudController<YktProjectMapper, Y
 
     @Value("${ykt.upload.base-dir}")
     private String baseDir;
+
+    // ===== 审核链的 5 棒（手册 §七(一)3）=====
+    private static final String ST_ENTRY  = "ENTRY";   // 县区财政局录入
+    private static final String ST_COUNTY = "COUNTY";  // 县区财政局审核岗
+    private static final String ST_SZ     = "SZ";      // 市州财政综合岗（选定归口处室）
+    private static final String ST_DEPT   = "DEPT";    // 省财政厅业务处室（=归口处室）
+    private static final String ST_AGRI   = "AGRI";    // 省财政厅农业处（终审）
+    private static final String ST_DONE   = "DONE";
+
+    /** 各棒 -> 该棒岗位的角色 ID（migrate_28/29）。admin 全放行。 */
+    private static final Map<String, Long> STAGE_ROLE = Map.of(
+            ST_COUNTY, 13L,   // 县区财政-项目审核岗（migrate_29 归位财政局，非民政局 role 5）
+            ST_SZ,     8L,    // 市州财政综合岗
+            ST_DEPT,   9L,    // 省财政厅业务处室
+            ST_AGRI,   10L    // 省财政厅农业处
+    );
+    /** 各棒岗位名（写审核日志 / 报错文案用）。 */
+    private static final Map<String, String> STAGE_NAME = Map.of(
+            ST_COUNTY, "县区财政局审核岗",
+            ST_SZ,     "市州财政综合岗",
+            ST_DEPT,   "省财政厅业务处室",
+            ST_AGRI,   "省财政厅农业处"
+    );
+    /** 省财政厅信息处：终审后核定追踪代码。 */
+    private static final long ROLE_PROV_INFO = 11L;
 
     @Override protected YktProjectMapper getMapper() { return mapper; }
 
@@ -125,7 +162,10 @@ public class YktProjectController extends BaseCrudController<YktProjectMapper, Y
         boolean forAudit = "true".equalsIgnoreCase(str(params.get("forAudit"), "false"));
         if (forAudit) {
             // 审核页：审核人看不到草稿
-            if ("pending".equals(tab))      w.eq("AUDIT_STATUS", "SUBMITTED");
+            if ("pending".equals(tab)) {
+                w.eq("AUDIT_STATUS", "SUBMITTED");
+                applyStageScope(w);   // 待审核只列「本岗那一棒」，避免各岗看到别人的活
+            }
             else if ("audited".equals(tab)) w.eq("AUDIT_STATUS", "APPROVED");
             else                            w.in("AUDIT_STATUS", "SUBMITTED", "APPROVED");
         } else {
@@ -145,10 +185,18 @@ public class YktProjectController extends BaseCrudController<YktProjectMapper, Y
     public R<?> create(@RequestBody YktProject p) {
         validateShortName(p);
         validateLevel(p);
-        if (p.getAuditStatus() == null) p.setAuditStatus("DRAFT");
-        if (p.getAuditStage() == null) p.setAuditStage("ENTRY");
-        if (p.getLastResult() == null) p.setLastResult("草稿");
-        if (p.getIncluded() == null) p.setIncluded(0);
+        // 工作流字段一律服务端定，忽略客户端传值：否则请求体带 auditStatus=APPROVED/projectCode
+        // 即可绕过 5 棒审核链自造已终审项目（编码由省农业处终审生成、追踪代码由省信息处核定）
+        p.setAuditStatus("DRAFT");
+        p.setAuditStage(ST_ENTRY);
+        p.setLastResult("草稿");
+        p.setIncluded(0);
+        p.setProjectCode(null);
+        p.setTraceCode(null);
+        p.setPivotOfficeCode(null);
+        p.setPivotOfficeName(null);
+        p.setCatalogCode(null);
+        p.setCatalogName(null);
         mapper.insert(p);
         return R.ok(p);
     }
@@ -159,8 +207,35 @@ public class YktProjectController extends BaseCrudController<YktProjectMapper, Y
         assertProjectVisible(p.getId());   // 县域越权兜底：不能改别县项目（送审/审核等流转已各自校验，此处补普通编辑）
         validateShortName(p);
         validateLevel(p);
+        // 工作流字段只能走 submit/approve/reject/trace-code/include/link 各自接口流转，
+        // 普通编辑置 null 让 updateById 跳过（MP 忽略 null 列），防请求体直改状态/编码越权
+        p.setAuditStatus(null);
+        p.setAuditStage(null);
+        p.setLastResult(null);
+        p.setProjectCode(null);
+        p.setTraceCode(null);
+        p.setPivotOfficeCode(null);
+        p.setPivotOfficeName(null);
+        p.setIncluded(null);
+        p.setCatalogCode(null);
+        p.setCatalogName(null);
         mapper.updateById(p);
         return R.ok();
+    }
+
+    /** 删除兜底：县域校验之外，非 admin 仅可删草稿——在途/已终审项目须走撤销或退回，不能一删了之。 */
+    @Override
+    protected void assertWritable(YktProject e) {
+        assertReadable(e);
+        if (isAdmin()) return;
+        if (e.getAuditStatus() != null && !"DRAFT".equals(e.getAuditStatus()))
+            throw new BizException("仅草稿状态项目可删除，审核中请先撤销/退回");
+    }
+
+    private boolean isAdmin() {
+        Long uid = UserContext.currentUserId();
+        SysUser u = uid == null ? null : userMapper.selectById(uid);
+        return u != null && "SYS_ADMIN".equals(u.getUserType());
     }
 
     @Data
@@ -170,9 +245,11 @@ public class YktProjectController extends BaseCrudController<YktProjectMapper, Y
         /** 市州综合岗审核时选定的归口处室 */
         private String officeCode;
         private String officeName;
+        /** 省财政厅信息处核定的追踪代码 */
+        private String traceCode;
     }
 
-    /** 送审（批量）：录入岗 -> 市州财政综合岗 */
+    /** 送审（批量）：录入岗 -> 县区财政局审核岗（手册 §七(一)3 第一棒） */
     @PostMapping("/submit")
     @Transactional(rollbackFor = Exception.class)
     public R<?> submit(@RequestBody FlowReq req) {
@@ -183,19 +260,22 @@ public class YktProjectController extends BaseCrudController<YktProjectMapper, Y
             assertProjectVisible(id);   // 县域越权兜底：不能操作别县项目
             if (!"DRAFT".equals(p.getAuditStatus()))
                 throw new BizException("项目[" + p.getProjectName() + "]非草稿状态，无法送审");
-            writeLog(p, "录入岗", "送审", "已送审", req.getOpinion(), "市州财政综合岗");
+            writeLog(p, "录入岗", "送审", "已送审", req.getOpinion(), STAGE_NAME.get(ST_COUNTY));
             p.setAuditStatus("SUBMITTED");
-            p.setAuditStage("SZ");
-            p.setLastResult("待市州综合岗审核");
+            p.setAuditStage(ST_COUNTY);
+            p.setLastResult("待" + STAGE_NAME.get(ST_COUNTY) + "审核");
             mapper.updateById(p);
         }
         return R.ok();
     }
 
     /**
-     * 审核（批量）·两段制：
-     *  - 市州财政综合岗(SZ)：选定归口处室 -> 转交归口处室(DEPT)，不终审；
-     *  - 归口处室(DEPT)：终审(APPROVED) + 自动生成项目编码。
+     * 审核（批量）·5 棒推进（手册 §七(一)3）：
+     *  - 县区财政局审核岗(COUNTY) -> 市州财政综合岗(SZ)
+     *  - 市州财政综合岗(SZ)：须选定归口处室 -> 省财政厅业务处室(DEPT)
+     *  - 省财政厅业务处室(DEPT) -> 省财政厅农业处(AGRI)
+     *  - 省财政厅农业处(AGRI)：终审(APPROVED) + 自动生成项目编码 -> 完成(DONE)
+     * 每棒都校验操作人持有该棒角色（admin 放行）；追踪代码由信息处另行核定，不在此链。
      */
     @PostMapping("/approve")
     @Transactional(rollbackFor = Exception.class)
@@ -208,32 +288,112 @@ public class YktProjectController extends BaseCrudController<YktProjectMapper, Y
             if (!"SUBMITTED".equals(p.getAuditStatus()))
                 throw new BizException("项目[" + p.getProjectName() + "]非审核中状态，无法审核");
             String stage = p.getAuditStage();
-            if ("SZ".equals(stage)) {
-                // 市州综合岗：必须选定归口处室，转交归口处室继续审核
-                if (req.getOfficeCode() == null || req.getOfficeCode().isBlank()
-                        || req.getOfficeName() == null || req.getOfficeName().isBlank())
-                    throw new BizException("市州综合岗审核须选定归口处室");
-                p.setPivotOfficeCode(req.getOfficeCode());
-                p.setPivotOfficeName(req.getOfficeName());
-                p.setAuditStage("DEPT");
-                p.setLastResult("待归口处室审核");
-                writeLog(p, "市州财政综合岗", "审核", "审核通过·转交归口处室[" + req.getOfficeName() + "]",
-                        req.getOpinion(), "归口处室");
-                mapper.updateById(p);
-            } else if ("DEPT".equals(stage)) {
-                // 归口处室：终审
-                writeLog(p, "归口处室", "审核", "审核通过·终审", req.getOpinion(), "结束");
-                p.setAuditStatus("APPROVED");
-                p.setAuditStage("DONE");
-                p.setLastResult("已终审");
-                if (p.getProjectCode() == null || p.getProjectCode().isBlank())
-                    p.setProjectCode(genProjectCode(p.getCreateBy()));
-                mapper.updateById(p);
-            } else {
-                throw new BizException("项目[" + p.getProjectName() + "]当前阶段无法审核");
+            assertStageRole(stage, p);  // 岗位校验：只有本棒岗位（或 admin）能审
+            switch (stage) {
+                case ST_COUNTY -> {
+                    writeLog(p, STAGE_NAME.get(ST_COUNTY), "审核", "审核通过", req.getOpinion(), STAGE_NAME.get(ST_SZ));
+                    p.setAuditStage(ST_SZ);
+                    p.setLastResult("待" + STAGE_NAME.get(ST_SZ) + "审核");
+                }
+                case ST_SZ -> {
+                    // 市州综合岗：必须选定归口处室，转交省财政厅业务处室继续审核（手册 §七(三)2 注）
+                    if (req.getOfficeCode() == null || req.getOfficeCode().isBlank()
+                            || req.getOfficeName() == null || req.getOfficeName().isBlank())
+                        throw new BizException("市州综合岗审核须选定归口处室");
+                    p.setPivotOfficeCode(req.getOfficeCode());
+                    p.setPivotOfficeName(req.getOfficeName());
+                    p.setAuditStage(ST_DEPT);
+                    p.setLastResult("待" + STAGE_NAME.get(ST_DEPT) + "审核");
+                    writeLog(p, STAGE_NAME.get(ST_SZ), "审核", "审核通过·选定归口处室[" + req.getOfficeName() + "]",
+                            req.getOpinion(), STAGE_NAME.get(ST_DEPT));
+                }
+                case ST_DEPT -> {
+                    writeLog(p, STAGE_NAME.get(ST_DEPT), "审核", "审核通过", req.getOpinion(), STAGE_NAME.get(ST_AGRI));
+                    p.setAuditStage(ST_AGRI);
+                    p.setLastResult("待" + STAGE_NAME.get(ST_AGRI) + "审核");
+                }
+                case ST_AGRI -> {
+                    // 省财政厅农业处：终审 + 生成项目编码（手册：编码由终审后自动生成）
+                    writeLog(p, STAGE_NAME.get(ST_AGRI), "审核", "审核通过·终审", req.getOpinion(), "结束");
+                    p.setAuditStatus("APPROVED");
+                    p.setAuditStage(ST_DONE);
+                    p.setLastResult("已终审");
+                    if (p.getProjectCode() == null || p.getProjectCode().isBlank())
+                        p.setProjectCode(genProjectCode(p.getCreateBy()));
+                }
+                default -> throw new BizException("项目[" + p.getProjectName() + "]当前阶段无法审核");
             }
+            mapper.updateById(p);
         }
         return R.ok();
+    }
+
+    /**
+     * 省财政厅信息处核定追踪代码（手册 §七(一) 流程图虚线旁支）。
+     * 仅终审(APPROVED)项目可核定；核定不改变审核状态，是终审后的补充动作。
+     */
+    @PostMapping("/trace-code")
+    @Transactional(rollbackFor = Exception.class)
+    public R<?> traceCode(@RequestBody FlowReq req) {
+        require(req);
+        if (req.getTraceCode() == null || req.getTraceCode().isBlank())
+            throw new BizException("请填写追踪代码");
+        assertHasRole(ROLE_PROV_INFO, "省财政厅信息处");
+        String code = req.getTraceCode().trim();
+        if (!code.matches("[0-9A-Za-z_-]{1,64}"))
+            throw new BizException("追踪代码只能是字母/数字/下划线/连字符，且不超过 64 位");
+        for (Long id : req.getIds()) {
+            YktProject p = mapper.selectById(id);
+            if (p == null) continue;
+            assertProjectVisible(id);
+            if (!"APPROVED".equals(p.getAuditStatus()))
+                throw new BizException("项目[" + p.getProjectName() + "]未终审，无法核定追踪代码");
+            p.setTraceCode(code);
+            writeLog(p, "省财政厅信息处", "核定", "核定追踪代码[" + code + "]", req.getOpinion(), "结束");
+            mapper.updateById(p);
+        }
+        return R.ok();
+    }
+
+    /** 当前棒岗位校验：操作人须持有该棒角色（admin 放行）。 */
+    private void assertStageRole(String stage, YktProject p) {
+        Long need = STAGE_ROLE.get(stage);
+        if (need == null) throw new BizException("项目[" + p.getProjectName() + "]当前阶段无法审核");
+        assertHasRole(need, STAGE_NAME.get(stage));
+    }
+
+    /**
+     * 审核页「待审核」按岗位收窄到本岗那一棒。
+     * admin / 未识别岗位（例如同时持多岗）→ 不收窄，仍能看到全部 SUBMITTED；
+     * 恰好持某几棒的岗位 → 只看这几棒对应的 AUDIT_STAGE。
+     */
+    private void applyStageScope(QueryWrapper<YktProject> w) {
+        Long uid = UserContext.currentUserId();
+        SysUser u = uid == null ? null : userMapper.selectById(uid);
+        // token 有效但用户已删：对齐 DataScopeResolver 的最窄拒止，不能按 admin 口径全见
+        if (uid != null && u == null) { w.apply("1 = 0"); return; }
+        if (u == null || "SYS_ADMIN".equals(u.getUserType())) return;   // admin 全见
+        Set<Long> roleIds = userRoleMapper.selectList(
+                        new LambdaQueryWrapper<SysUserRole>().eq(SysUserRole::getUserId, uid))
+                .stream().map(SysUserRole::getRoleId).collect(java.util.stream.Collectors.toSet());
+        // 该用户各角色能审的棒
+        List<String> stages = STAGE_ROLE.entrySet().stream()
+                .filter(e -> roleIds.contains(e.getValue()))
+                .map(Map.Entry::getKey).toList();
+        if (stages.isEmpty()) return;   // 无审核岗（如纯录入岗误入）→ 不额外收窄，交给上层 tab/权限控制
+        w.in("AUDIT_STAGE", stages);
+    }
+
+    /** 操作人须持有指定角色；admin 放行。 */
+    private void assertHasRole(long roleId, String stationName) {
+        Long uid = UserContext.currentUserId();
+        SysUser u = uid == null ? null : userMapper.selectById(uid);
+        if (u != null && "SYS_ADMIN".equals(u.getUserType())) return;
+        boolean has = uid != null && !userRoleMapper.selectList(
+                new LambdaQueryWrapper<SysUserRole>()
+                        .eq(SysUserRole::getUserId, uid)
+                        .eq(SysUserRole::getRoleId, roleId)).isEmpty();
+        if (!has) throw new BizException("当前操作须由「" + stationName + "」岗办理，你无该岗权限");
     }
 
     /** 退回（批量）：回到录入岗 */
@@ -248,10 +408,11 @@ public class YktProjectController extends BaseCrudController<YktProjectMapper, Y
             assertProjectVisible(id);   // 县域越权兜底：不能操作别县项目
             if (!"SUBMITTED".equals(p.getAuditStatus()))
                 throw new BizException("项目[" + p.getProjectName() + "]非审核中状态，无法退回");
-            String doneStation = "DEPT".equals(p.getAuditStage()) ? "归口处室" : "市州财政综合岗";
+            assertStageRole(p.getAuditStage(), p);   // 只有本棒岗位能退回
+            String doneStation = STAGE_NAME.getOrDefault(p.getAuditStage(), "审核岗");
             writeLog(p, doneStation, "退回", "审核退回", opinion, "录入岗");
             p.setAuditStatus("DRAFT");
-            p.setAuditStage("ENTRY");
+            p.setAuditStage(ST_ENTRY);
             p.setLastResult("审核退回");
             mapper.updateById(p);
         }
@@ -272,15 +433,20 @@ public class YktProjectController extends BaseCrudController<YktProjectMapper, Y
                 .eq(YktProjectAuditLog::getProjectId, id).orderByAsc(YktProjectAuditLog::getSeqNo)));
     }
 
-    /** 撤销送审（单条，纳入挂接页沿用） */
+    /**
+     * 撤销送审（单条）。手册 §七(三)2：下一岗(县审核岗)还没审时才可撤销，已进入后续棒则「撤销失败」。
+     * 因此仅当项目仍停在第一棒 COUNTY（县审核岗待审）时允许录入岗撤回。
+     */
     @PostMapping("/{id}/revoke")
     public R<?> revoke(@PathVariable Long id) {
         YktProject p = mapper.selectById(id);
         if (p == null) throw new BizException("项目不存在");
         assertProjectVisible(id);   // 县域越权兜底
-        if (!"SUBMITTED".equals(p.getAuditStatus())) throw new BizException("下一岗已审核，撤销失败");
+        if (!"SUBMITTED".equals(p.getAuditStatus()) || !ST_COUNTY.equals(p.getAuditStage()))
+            throw new BizException("下一岗已审核，撤销失败");
+        writeLog(p, "录入岗", "撤销送审", "已撤销", null, "录入岗");
         p.setAuditStatus("DRAFT");
-        p.setAuditStage("ENTRY");
+        p.setAuditStage(ST_ENTRY);
         p.setLastResult("草稿");
         mapper.updateById(p);
         return R.ok();

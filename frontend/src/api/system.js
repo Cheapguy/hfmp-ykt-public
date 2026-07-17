@@ -55,6 +55,7 @@ export const projectApi = {
   submit:  (ids, opinion) => request.post('/dept/project/submit', { ids, opinion }),
   approve: (ids, opinion, officeCode, officeName) => request.post('/dept/project/approve', { ids, opinion, officeCode, officeName }),
   reject:  (ids, opinion) => request.post('/dept/project/reject', { ids, opinion }),
+  traceCode: (ids, traceCode, opinion) => request.post('/dept/project/trace-code', { ids, traceCode, opinion }),
   offices: () => request.get('/dept/project/offices'),
   upload:  (formData) => request.post('/dept/project/upload', formData, { headers: { 'Content-Type': 'multipart/form-data' } }),
   history: (id) => request.get(`/dept/project/${id}/history`),

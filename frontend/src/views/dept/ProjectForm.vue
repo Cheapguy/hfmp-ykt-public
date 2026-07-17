@@ -47,7 +47,7 @@
         </el-form-item></el-col>
 
         <el-col :span="8"><el-form-item label="追踪代码" prop="traceCode">
-          <el-input v-model="form.traceCode" maxlength="64" />
+          <el-input v-model="form.traceCode" disabled placeholder="由省财政厅信息处终审后核定" />
         </el-form-item></el-col>
 
         <el-col :span="24"><el-form-item label="补贴范围及对象" prop="subsidyScope">

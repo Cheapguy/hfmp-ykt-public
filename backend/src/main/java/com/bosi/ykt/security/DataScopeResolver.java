@@ -51,12 +51,16 @@ public class DataScopeResolver {
         public final String countyCode;        // 6 位县码
         public final Long ownTownId;           // 本机构(乡镇) id
         public final List<Long> countyTownIds; // 本县所有乡镇 id（COUNTY 用）
+        public final boolean denied;           // 最窄拒止态（token 有效但用户已删/无机构）：应看不到任何业务数据
         Ctx(Scope s, String cc, Long own, List<Long> towns) {
-            this.scope = s; this.countyCode = cc; this.ownTownId = own; this.countyTownIds = towns;
+            this(s, cc, own, towns, false);
+        }
+        Ctx(Scope s, String cc, Long own, List<Long> towns, boolean denied) {
+            this.scope = s; this.countyCode = cc; this.ownTownId = own; this.countyTownIds = towns; this.denied = denied;
         }
         static Ctx all() { return new Ctx(Scope.ALL, null, null, null); }
-        /** 最窄拒止：推不出县的非管理员账号——乡镇条件恒空(=-1)，项目只剩省级公有。 */
-        static Ctx deny() { return new Ctx(Scope.OWN_ORG, "000000", -1L, null); }
+        /** 最窄拒止：推不出县的非管理员账号——乡镇条件恒空(=-1)，项目走 denied 分支彻底锁死。 */
+        static Ctx deny() { return new Ctx(Scope.OWN_ORG, "000000", -1L, null, true); }
     }
 
     private static final String REQ_ATTR = DataScopeResolver.class.getName() + ".CTX";
@@ -160,21 +164,48 @@ public class DataScopeResolver {
 
     /**
      * 项目可见性。优先「分配数据」显式授权：该用户在 SYS_USER_PROJECT 有行 → 仅这些项目 id；
-     * 否则回落县码规则：本县自建（9+县码）或 省级公有（非任何县码）或 无编码（不可归属→公有）。
+     * 否则回落县码规则：本县自建（9+县码）或 省级公有（非任何县码）。
+     *
+     * <p>两分支都放行「在途项目」（无编码，即终审前的草稿/审核中）：项目编码终审后才生成，
+     * 在途项目既无县前缀、也未进授权表，若不放行则本县审核链根本走不动（录入岗送不了审、
+     * 审核岗看不到本县待审）。在途项目按创建人所属县归属，只对同县可见，不泄漏别县草稿。
      */
     public void applyProject(AbstractWrapper<?, ?, ?> w, String codeCol) {
         Ctx c = current();
         if (c.scope == Scope.ALL) return;
+        // 已删账号（token 未过期）：不走白名单/县码/在途任何放行分支，彻底锁死。
+        // 否则其残留的 SYS_USER_PROJECT 白名单行仍会让已删账号读到被分配项目。
+        if (c.denied) { w.apply("1 = 0"); return; }
         Long uid = UserContext.currentUserId();
+        String inflight = inflightCountyClause(codeCol, c.countyCode, uid);
         if (uid != null && hasAssignedProjects(uid)) {
             // 子查询而非拼 id 列表：授权项目再多也不会踩 ORA-01795（IN 上限 1000）
-            w.apply("ID IN (SELECT PROJECT_ID FROM SYS_USER_PROJECT WHERE USER_ID = " + uid + ")");
+            w.apply("(ID IN (SELECT PROJECT_ID FROM SYS_USER_PROJECT WHERE USER_ID = " + uid + ")"
+                    + inflight + ")");
             return;
         }
         String owned = ownedCountyPrefixesCsv();
         w.apply("(" + codeCol + " LIKE '9" + c.countyCode + "%'"
-                + " OR " + codeCol + " IS NULL"
-                + " OR SUBSTR(" + codeCol + ",1,7) NOT IN (" + owned + "))");
+                + " OR SUBSTR(" + codeCol + ",1,7) NOT IN (" + owned + ")"
+                + inflight + ")");
+    }
+
+    /**
+     * 「在途项目」可见子句（前置 " OR "）：无编码项目按创建人所属县归属。
+     * 本人创建的恒可见（CREATE_BY=uid）——assigned 白名单分支的用户建的项目终审后编码非空、
+     * 又不在自己白名单里，只有靠这条才能看到自己建的项目，删不得；同县他人创建的在途项目对本县审核岗可见。
+     * 已删账号的 deny 态已在 applyProject 上游 1=0 锁死，不会经此漏看。
+     * countyCode 为库内 6 位码、uid 为服务端 long，均非用户输入，无注入面。
+     */
+    private String inflightCountyClause(String codeCol, String countyCode, Long uid) {
+        StringBuilder sb = new StringBuilder();
+        if (uid != null) sb.append(" OR CREATE_BY = ").append(uid);
+        if (countyCode != null) {
+            sb.append(" OR (").append(codeCol).append(" IS NULL AND CREATE_BY IN (")
+              .append("SELECT su.ID FROM SYS_USER su JOIN SYS_ORG so ON so.ID = su.ORG_ID")
+              .append(" WHERE SUBSTR(so.ORG_CODE,1,6) = '").append(countyCode).append("'))");
+        }
+        return sb.toString();
     }
 
     /** 该用户是否有「分配数据」显式授权；无=走县码规则。 */
