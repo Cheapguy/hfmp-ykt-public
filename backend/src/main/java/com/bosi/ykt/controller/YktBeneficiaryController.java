@@ -77,6 +77,17 @@ public class YktBeneficiaryController extends BaseCrudController<YktBeneficiaryM
         if (v != null && !"".equals(v)) w.eq(col, v);
     }
 
+    /**
+     * 补贴对象归属乡镇由村(居)委会唯一决定：前端新增/修改表单只选村委会(villageId)不选乡镇，
+     * 这里按 villageId 回查回填 townId——否则 townId 为空会被县域校验误判「非本县数据」，且落库后过滤永远查不到。
+     */
+    private void fillTownFromVillage(YktBeneficiary e) {
+        if (e.getVillageId() == null) return;
+        YktVillage v = villageMapper.selectById(e.getVillageId());
+        if (v == null) throw new com.bosi.ykt.common.BizException("村(居)委会不存在");
+        e.setTownId(v.getTownId());
+    }
+
     /** 县域越权兜底（写路径）：目标乡镇不在本人可见范围则拒。 */
     private void assertTownScope(Long townId) {
         java.util.Set<Long> towns = dataScope.allowedTowns();
@@ -116,8 +127,33 @@ public class YktBeneficiaryController extends BaseCrudController<YktBeneficiaryM
                 .eq("ID_CARD", idCard.trim()).last("AND ROWNUM=1"));
     }
 
+    /** 列表：附带把 createBy(用户 id) 反查显示名，避免前端直接展示 700031 这类裸 id。 */
+    @Override
+    @GetMapping("/page")
+    public R<com.baomidou.mybatisplus.core.metadata.IPage<YktBeneficiary>> page(
+            @RequestParam(defaultValue = "1") long pageNum,
+            @RequestParam(defaultValue = "10") long pageSize,
+            @RequestParam Map<String, Object> params) {
+        R<com.baomidou.mybatisplus.core.metadata.IPage<YktBeneficiary>> r = super.page(pageNum, pageSize, params);
+        com.baomidou.mybatisplus.core.metadata.IPage<YktBeneficiary> pg = r.getData();
+        List<YktBeneficiary> rows = pg == null ? null : pg.getRecords();
+        if (rows != null && !rows.isEmpty()) {
+            Set<Long> ids = new HashSet<>();
+            for (YktBeneficiary b : rows) if (b.getCreateBy() != null) ids.add(b.getCreateBy());
+            if (!ids.isEmpty()) {
+                Map<Long, String> disp = new HashMap<>();
+                for (SysUser u : userMapper.selectBatchIds(ids))
+                    disp.put(u.getId(), (u.getRealName() == null || u.getRealName().isBlank()) ? u.getUsername() : u.getRealName());
+                for (YktBeneficiary b : rows)
+                    b.setCreateByName(b.getCreateBy() == null ? null : disp.get(b.getCreateBy()));
+            }
+        }
+        return r;
+    }
+
     @Override
     public R<?> create(@org.springframework.web.bind.annotation.RequestBody YktBeneficiary e) {
+        fillTownFromVillage(e);          // 前端表单只选村委会，按村委会推乡镇归属
         assertTownScope(e.getTownId());
         // 引用建档（referred=1，人户迁移复制建档）放行同证复制，普通新增全库查重
         if (!Integer.valueOf(1).equals(e.getReferred())) {
@@ -132,6 +168,7 @@ public class YktBeneficiaryController extends BaseCrudController<YktBeneficiaryM
     public R<?> update(@org.springframework.web.bind.annotation.RequestBody YktBeneficiary e) {
         if (e.getId() == null) throw new com.bosi.ykt.common.BizException("缺少 id");
         YktBeneficiary old = assertExisting(e.getId());
+        fillTownFromVillage(e);          // 改了村委会则同步回填新乡镇归属（未改村委会 villageId 为空不动 townId）
         if (e.getTownId() != null) assertTownScope(e.getTownId());   // 改乡镇归属也须在本县内
         // 仅当把身份证号改成了别的号时查重（不改号的常规编辑不受已有引用副本影响）
         if (e.getIdCard() != null && !e.getIdCard().isBlank()
@@ -146,21 +183,50 @@ public class YktBeneficiaryController extends BaseCrudController<YktBeneficiaryM
 
     @Override
     public R<?> delete(@PathVariable Long id) {
-        assertExisting(id);
+        YktBeneficiary b = assertExisting(id);
+        // 引用关系保护：本记录是「原始建档」（未标记 referred=1），且已被其他乡镇引用建档（存在同证 referred=1 副本）时，
+        // 必须由引用乡镇先删除引用副本（副本 referred=1 可直接删）后，原乡镇才能删除。提示被引用到的具体乡镇。
+        if (!Integer.valueOf(1).equals(b.getReferred()) && b.getIdCard() != null && !b.getIdCard().isBlank()) {
+            List<YktBeneficiary> refs = mapper.selectList(new QueryWrapper<YktBeneficiary>()
+                    .eq("ID_CARD", b.getIdCard().trim()).eq("REFERRED", 1).ne("ID", id));
+            if (!refs.isEmpty()) {
+                String towns = refs.stream().map(r -> ownerLabel(r.getTownId()))
+                        .distinct().collect(java.util.stream.Collectors.joining("、"));
+                throw new BizException("家庭成员：" + nz(b.getName()) + "，身份证号码：" + b.getIdCard()
+                        + " 已被【" + towns + "】引用，请先由对应乡镇删除引用后，本乡镇再删除！");
+            }
+        }
         return super.delete(id);
     }
 
     /**
-     * 引用：按身份证号查补贴对象（跨乡镇引用前需沟通完善信息）。手册 §八-6
-     * 跨乡镇是业务放开的（人户迁移），跨县不放——否则任何乡镇账号可拿身份证枚举全州对象的银行账号。
-     * 返回整条实体是刻意的：前端「确定引用」把它整体预填进新增表单（引用=复制建档）。
+     * 引用：按身份证号全系统检索补贴对象（人户迁移/跨乡镇发放）。手册 §八-6
+     * 检索面放开为「系统内检索」是刻意的（人户迁移要跨乡镇）；但返回体只回**身份核对 + 落地所需的非敏感字段**，
+     * 银行账号 / 社保卡 / 公共账户 / 电话一律不下发——否则任意登录账号拿身份证即可枚举全省银行账号。
+     * 真正复制建档要用的敏感字段，在「纳入」时由后台从原始档（sourceId）拷，不经客户端往返。
      */
     @GetMapping("/refer")
     public R<YktBeneficiary> refer(@RequestParam String idCard) {
-        QueryWrapper<YktBeneficiary> w = new QueryWrapper<YktBeneficiary>().eq("ID_CARD", idCard);
-        dataScope.applyCountyTown(w, "TOWN_ID");
-        w.last("AND ROWNUM=1");
-        return R.ok(mapper.selectOne(w));
+        // 注意：Oracle ROWNUM 与 ORDER BY 不能靠 last() 拼（last 追加在 ORDER BY 之后语法非法），
+        // 且 11g 无 FETCH FIRST——改 SQL 端按 REFERRED 升序（原始 0 优先于副本 1）取全部，Java 取第一条。
+        List<YktBeneficiary> list = mapper.selectList(new QueryWrapper<YktBeneficiary>()
+                .eq("ID_CARD", idCard).orderByAsc("REFERRED"));
+        if (list.isEmpty()) return R.ok(null);
+        YktBeneficiary src = list.get(0);
+        YktBeneficiary view = new YktBeneficiary();   // 敏感字段脱敏：只投影下列，其余（bankAccount/socialCard/公共账户/phone）不出库
+        view.setId(src.getId());
+        view.setHouseholdCode(src.getHouseholdCode());
+        view.setHeadName(src.getHeadName());
+        view.setName(src.getName());
+        view.setIdCard(src.getIdCard());
+        view.setTownId(src.getTownId());
+        view.setVillageId(src.getVillageId());
+        view.setGroupName(src.getGroupName());
+        view.setGender(src.getGender());
+        view.setRelation(src.getRelation());
+        view.setReferred(src.getReferred());
+        view.setTownLabel(ownerLabel(src.getTownId()));   // 「县-乡镇」跨县也能显示，前端下拉是县域收窄的算不了
+        return R.ok(view);
     }
 
     /** 注销。手册 §八-7（状态置 0） */

@@ -72,6 +72,7 @@ public class YktCorrectionController {
             m.put("bankAccount", d.getBankAccount());
             m.put("batchCode", d.getBatchCode());
             m.put("batchName", b.getBatchName());
+            m.put("projectId", b.getProjectId());   // 供工作台待办点入回填项目下拉
             m.put("townName", b.getTownId() == null ? null : orgName.computeIfAbsent(b.getTownId(),
                     id -> { SysOrg o = orgMapper.selectById(id); return o == null ? null : o.getOrgName(); }));
             m.put("villageName", d.getVillageName());

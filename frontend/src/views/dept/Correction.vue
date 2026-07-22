@@ -65,9 +65,12 @@
 
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Download, RefreshRight } from '@element-plus/icons-vue'
 import { correctionApi, projectApi, orgApi, queryApi } from '../../api/system'
+
+const route = useRoute()
 
 const STATUS_TYPE = { '已退款': 'warning', '已退回': 'danger', '支付失败': 'danger' }
 const projects = ref([]); const towns = ref([]); const batches = ref([]); const batchLoading = ref(false)
@@ -77,6 +80,10 @@ const rows = ref([]); const loading = ref(false); const selected = ref([])
 onMounted(async () => {
   projects.value = (await projectApi.list({ included: 1, tab: 'all' })) || []
   towns.value = ((await orgApi.tree()) || []).filter(o => o.orgType === 'TOWN')
+  // 工作台待办点入：默认选中对应项目/批次（Long 已按字符串序列化，直接用，勿 Number 丢精度）
+  if (route.query.projectId) query.projectId = String(route.query.projectId)
+  if (route.query.batchCode) query.batchCode = String(route.query.batchCode)
+  if (query.projectId) await loadBatches('')   // 预载批次下拉，令批次能显示名称
   reload()
 })
 

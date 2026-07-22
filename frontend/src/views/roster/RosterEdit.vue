@@ -111,45 +111,68 @@
       </template>
     </el-dialog>
 
-    <!-- 批量填报 -->
-    <el-dialog v-model="fillVisible" title="批量填报" width="94%" top="4vh">
+    <!-- 批量填报（宽表可编辑 + 逐行增删；勾选带金额的行保存，同批次人员不可重复） -->
+    <el-dialog v-model="fillVisible" title="批量填报" width="96%" top="3vh">
       <div class="fill-search">
         <div class="sf"><label><span class="req">*</span>数据来源：</label>
           <el-select v-model="fill.source" style="width:220px" @change="fillQuery">
-            <el-option label="1-家庭成员表" value="1" />
+            <el-option label="1-补贴对象库" value="1" />
             <el-option label="2-历史发放数据" value="2" />
           </el-select>
         </div>
         <div class="sf"><label>行政村：</label>
-          <el-select v-model="fill.villageId" clearable filterable style="width:220px">
-            <el-option v-for="v in villages" :key="v.id" :label="v.villageName" :value="v.id" />
+          <el-select v-model="fill.villageId" clearable filterable style="width:240px">
+            <el-option v-for="v in villages" :key="v.id"
+              :label="v.villageCode ? `${v.villageCode}-${v.villageName}` : v.villageName" :value="v.id" />
           </el-select>
         </div>
-        <div class="sf"><label>享受人姓名：</label><el-input v-model="fill.beneficiaryName" clearable style="width:200px" @keyup.enter="fillQuery" /></div>
-        <div class="sf"><el-button type="primary" @click="fillQuery">查询</el-button></div>
-        <div class="sf"><label>统一补贴金额：</label>
-          <el-input-number v-model="fill.bulkAmount" :min="0" :precision="2" controls-position="right" />
-          <el-button size="small" style="margin-left:8px" @click="applyBulkAmount">应用到勾选</el-button>
+        <div class="sf">
+          <el-button type="primary" @click="fillQuery">查询</el-button>
+          <el-button type="primary" plain @click="fillExpanded = !fillExpanded">显示/隐藏</el-button>
         </div>
+        <template v-if="fillExpanded">
+          <div class="sf"><label>享受人姓名：</label><el-input v-model="fill.beneficiaryName" clearable style="width:220px" @keyup.enter="fillQuery" /></div>
+          <div class="sf"><label>统一补贴金额：</label>
+            <el-input-number v-model="fill.bulkAmount" :min="0" :precision="2" controls-position="right" />
+            <el-button size="small" style="margin-left:8px" @click="applyBulkAmount">应用到勾选</el-button>
+          </div>
+        </template>
       </div>
       <el-table ref="candTable" v-loading="fillLoading" :data="candidates" border stripe size="small"
-        height="56vh" @selection-change="onCandSelect">
-        <el-table-column type="selection" width="42" />
+        height="60vh" row-key="_k" @selection-change="onCandSelect">
+        <el-table-column type="selection" width="42" reserve-selection />
         <el-table-column type="index" label="序号" width="56" align="center" />
-        <el-table-column label="补贴金额" width="150" align="center">
-          <template #default="{ row }"><el-input-number v-model="row.amount" :min="0" :precision="2" size="small" controls-position="right" /></template>
+        <el-table-column label="操作" width="88" align="center">
+          <template #default="{ $index }">
+            <el-button link type="primary" @click="addFillRow($index)"><el-icon><Plus /></el-icon></el-button>
+            <el-button link type="danger" @click="delFillRow($index)"><el-icon><Minus /></el-icon></el-button>
+          </template>
         </el-table-column>
-        <el-table-column prop="holderName" label="户主姓名" width="90" />
-        <el-table-column prop="holderIdCard" label="户主身份证号" width="170" />
-        <el-table-column prop="beneficiaryName" label="享受人" width="90" />
-        <el-table-column prop="beneficiaryIdCard" label="享受人身份证号" width="170" />
-        <el-table-column prop="bankAccount" label="银行账号" width="180" />
-        <el-table-column prop="bankName" label="开户银行" width="260" show-overflow-tooltip>
-          <template #default="{ row }">{{ bankDisp(row.bankName) }}</template>
+        <el-table-column label="排序序号" width="80" align="center"><template #default="{ row }">{{ row.sortNo }}</template></el-table-column>
+        <el-table-column label="支付状态" width="80" align="center"><template #default="{ row }">{{ row.payStatus }}</template></el-table-column>
+        <el-table-column label="户主信息" align="center">
+          <el-table-column label="户主姓名" width="110"><template #default="{ row }"><el-input v-model="row.holderName" size="small" /></template></el-table-column>
+          <el-table-column label="户主身份证号" width="185"><template #default="{ row }"><el-input v-model="row.holderIdCard" size="small" maxlength="18" /></template></el-table-column>
         </el-table-column>
-        <el-table-column prop="villageName" label="村(居)委会" width="140" show-overflow-tooltip />
-        <el-table-column prop="groupName" label="村(居)民小组" width="110" />
-        <el-table-column prop="phone" label="联系电话" width="120" />
+        <el-table-column label="收款人信息" align="center">
+          <el-table-column label="收款人姓名" width="110"><template #default="{ row }"><el-input v-model="row.payeeName" size="small" /></template></el-table-column>
+          <el-table-column label="收款人身份证号" width="185"><template #default="{ row }"><el-input v-model="row.payeeIdCard" size="small" maxlength="18" /></template></el-table-column>
+          <el-table-column label="银行账号" width="185"><template #default="{ row }"><el-input v-model="row.bankAccount" size="small" /></template></el-table-column>
+          <el-table-column label="开户银行" width="250"><template #default="{ row }"><el-input v-model="row.bankName" size="small" /></template></el-table-column>
+        </el-table-column>
+        <el-table-column label="补贴对象信息" align="center">
+          <el-table-column label="村(居)委会" width="150"><template #default="{ row }"><el-input v-model="row.villageName" size="small" /></template></el-table-column>
+          <el-table-column label="村(居)民小组" width="120"><template #default="{ row }"><el-input v-model="row.groupName" size="small" /></template></el-table-column>
+          <el-table-column label="享受人" width="110"><template #default="{ row }"><el-input v-model="row.beneficiaryName" size="small" /></template></el-table-column>
+          <el-table-column label="享受人身份证号" width="185"><template #default="{ row }"><el-input v-model="row.beneficiaryIdCard" size="small" maxlength="18" /></template></el-table-column>
+        </el-table-column>
+        <el-table-column label="发放信息" align="center">
+          <el-table-column label="联系电话" width="130"><template #default="{ row }"><el-input v-model="row.phone" size="small" /></template></el-table-column>
+          <el-table-column label="补贴标准" width="120"><template #default="{ row }"><el-input-number v-model="row.standard" :min="0" :precision="2" size="small" controls-position="right" /></template></el-table-column>
+          <el-table-column label="补贴金额" width="120"><template #default="{ row }"><el-input-number v-model="row.amount" :min="0" :precision="2" size="small" controls-position="right" /></template></el-table-column>
+          <el-table-column label="填报日期" width="150"><template #default="{ row }"><el-date-picker v-model="row.fillDate" type="date" value-format="YYYY-MM-DD" size="small" style="width:100%" /></template></el-table-column>
+        </el-table-column>
+        <el-table-column label="备注信息" min-width="160"><template #default="{ row }"><el-input v-model="row.remark" size="small" /></template></el-table-column>
       </el-table>
       <template #footer>
         <span style="float:left;color:#909399">已勾选 {{ candSelected.length }} 人</span>
@@ -404,22 +427,37 @@ async function delSelected() {
   ElMessage.success('已删除'); reload()
 }
 
-// 批量填报（数据来源 + 行政村 + 查询 + 勾选 + 补贴金额 + 保存）
+// 批量填报（宽表可编辑 + 逐行增删；勾选带金额的行保存，同批次人员不可重复）
 const towns = ref([])
 const fillVisible = ref(false); const filling = ref(false); const fillLoading = ref(false)
+const fillExpanded = ref(false)
 const fill = reactive({ source: '1', villageId: null, beneficiaryName: '', bulkAmount: null })
 const candidates = ref([]); const candSelected = ref([]); const candTable = ref(null)
+// 行唯一键：+/- 增删行与选择保留（reserve-selection）都靠它，别用 index（增删后错位）
+let fillKeySeq = 0
+const blankFillRow = () => ({
+  _k: ++fillKeySeq, sortNo: 0, payStatus: '',
+  holderName: '', holderIdCard: '', payeeName: '', payeeIdCard: '', bankAccount: '', bankName: '',
+  villageName: '', groupName: '', beneficiaryName: '', beneficiaryIdCard: '', phone: '', age: null,
+  standard: 0, amount: 0, fillDate: null, remark: ''
+})
 function openFill() {
   if (!needBatch()) return
   candidates.value = []; candSelected.value = []
-  fill.villageId = null; fill.beneficiaryName = ''; fill.bulkAmount = null
+  fill.villageId = null; fill.beneficiaryName = ''; fill.bulkAmount = null; fillExpanded.value = false
   fillVisible.value = true
 }
 async function fillQuery() {
   fillLoading.value = true
   try {
-    const list = await rosterEditApi.fillCandidates({ source: fill.source, villageId: fill.villageId || undefined, beneficiaryName: fill.beneficiaryName || undefined })
-    candidates.value = (list || []).map(r => ({ ...r, amount: null, standard: null }))
+    // 带 batchId：后端剔除已在本批次的人员（同批次人员不可重复，二次填报搜不到已加的人）
+    const list = await rosterEditApi.fillCandidates({
+      batchId: batchId.value,
+      source: fill.source,
+      villageId: fill.villageId || undefined,
+      beneficiaryName: fill.beneficiaryName || undefined
+    })
+    candidates.value = (list || []).map(r => ({ ...blankFillRow(), ...r, _k: ++fillKeySeq, standard: 0, amount: 0 }))
   } finally { fillLoading.value = false }
 }
 function onCandSelect(s) { candSelected.value = s }
@@ -427,13 +465,19 @@ function applyBulkAmount() {
   if (fill.bulkAmount == null) return ElMessage.warning('请先填统一补贴金额')
   candSelected.value.forEach(r => { r.amount = fill.bulkAmount })
 }
+// 加号：当前行下方插入一条空白行；减号：确认后删除当前行
+function addFillRow(index) { candidates.value.splice(index + 1, 0, blankFillRow()) }
+async function delFillRow(index) {
+  await ElMessageBox.confirm('是否删除当前行？', '请选择', { type: 'warning' })
+  candidates.value.splice(index, 1)
+}
 async function doFillSave() {
-  if (!candSelected.value.length) return ElMessage.warning('请先勾选要添加的人员')
-  const bad = candSelected.value.some(r => r.amount == null || r.amount === '')
-  if (bad) return ElMessage.warning('勾选的人员需填写补贴金额')
+  // 勾选且填了补贴金额(>0)的行才保存；都没金额则「没有要保存的数据」
+  const toSave = candSelected.value.filter(r => r.amount != null && Number(r.amount) > 0)
+  if (!toSave.length) return ElMessage.warning('没有要保存的数据')
   filling.value = true
   try {
-    const n = await rosterEditApi.fillSave({ batchId: batchId.value, rows: candSelected.value })
+    const n = await rosterEditApi.fillSave({ batchId: batchId.value, rows: toSave })
     ElMessage.success(`已添加 ${n ?? 0} 人`); fillVisible.value = false; reload()
   } finally { filling.value = false }
 }

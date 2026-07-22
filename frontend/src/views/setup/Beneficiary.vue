@@ -16,6 +16,9 @@
         <el-button @click="cancelSel">注销</el-button>
         <el-button @click="uncancelSel">取消注销</el-button>
         <el-button @click="referVisible = true">引用</el-button>
+        <el-badge :value="referReqCount + approvedCount" :hidden="!(referReqCount + approvedCount)" type="danger">
+          <el-button @click="openReferReq()">引用请求</el-button>
+        </el-badge>
         <el-button @click="openBatch">批量修改</el-button>
       </template>
 
@@ -32,7 +35,7 @@
       <template #column-isFiling="{ value }">{{ labelOf(YESNO_OPTS, value) }}</template>
       <template #column-isTekun="{ value }">{{ labelOf(YESNO_OPTS, value) }}</template>
       <template #column-isRural="{ value }">{{ labelOf(RURAL_OPTS, value) }}</template>
-      <template #column-createBy="{ value }">{{ value || '一卡通' }}</template>
+      <template #column-createBy="{ row }">{{ row.createByName || '一卡通' }}</template>
 
       <!-- 表单：村(居)委会 / 开户银行 / 公共账户开户行 用 filterable 下拉 -->
       <template #form-villageId="{ form }">
@@ -96,6 +99,90 @@
       </template>
     </el-dialog>
 
+    <!-- 引用申请：选落地村组 + 留言(必填)，提交后交对方乡镇审核 -->
+    <el-dialog v-model="applyVisible" title="引用申请" width="560px">
+      <div v-if="applyForm" style="line-height:2;margin-bottom:8px;color:#606266">
+        <div>被引用人：{{ applyForm.name }}（{{ applyForm.idCard }}）</div>
+        <div>原属乡镇：{{ referResult && referResult._ownerLabel || '—' }}</div>
+      </div>
+      <el-form label-width="110px" v-if="applyForm">
+        <el-form-item label="落地村(居)委会" required>
+          <el-select v-model="applyForm.villageId" filterable placeholder="选择本乡镇村(居)委会" style="width:100%">
+            <el-option v-for="v in villages" :key="v.id" :label="`${v.villageCode}-${v.villageName}`" :value="v.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="村(居)民小组">
+          <el-input v-model="applyForm.groupName" maxlength="16" placeholder="村(居)民小组" />
+        </el-form-item>
+        <el-form-item label="留言" required>
+          <el-input v-model="applyForm.message" type="textarea" :rows="3" maxlength="500" show-word-limit
+            placeholder="向对方乡镇说明引用原因（必填）" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="applyVisible = false">取消</el-button>
+        <el-button type="primary" :loading="applySaving" @click="submitApply">提交申请</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 引用请求（两边视角）：待我审核=被引用乡镇确认/拒绝；我发起的=引用方看状态 + 已通过后自行纳入 -->
+    <el-dialog v-model="referReqVisible" title="引用请求" width="88%" top="5vh">
+      <el-tabs v-model="reviewTab">
+        <el-tab-pane name="pending">
+          <template #label>待我审核<el-badge v-if="referReqCount" :value="referReqCount" class="tab-badge" type="danger" /></template>
+          <el-table v-loading="referReqLoading" :data="referReqRows" border stripe size="small" height="56vh">
+            <el-table-column type="index" label="序号" width="56" align="center" />
+            <el-table-column prop="name" label="被引用人" width="100" />
+            <el-table-column prop="idCard" label="身份证号" width="180" />
+            <el-table-column prop="headName" label="户主" width="80" />
+            <el-table-column prop="applyTownLabel" label="申请乡镇" min-width="170" show-overflow-tooltip />
+            <el-table-column label="落地村组" min-width="150" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.targetVillageName }}{{ row.targetGroupName ? ' / ' + row.targetGroupName : '' }}</template>
+            </el-table-column>
+            <el-table-column prop="message" label="留言" min-width="180" show-overflow-tooltip />
+            <el-table-column prop="applyUserName" label="申请人" width="90" />
+            <el-table-column prop="applyTime" label="申请时间" width="150" align="center">
+              <template #default="{ row }">{{ fmtTime(row.applyTime) }}</template>
+            </el-table-column>
+            <el-table-column label="操作" width="140" align="center" fixed="right">
+              <template #default="{ row }">
+                <el-button type="primary" link @click="approveReq(row)">确认</el-button>
+                <el-button type="danger" link @click="rejectReq(row)">拒绝引用</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+          <el-empty v-if="!referReqLoading && !referReqRows.length" description="暂无待审引用请求" />
+        </el-tab-pane>
+
+        <el-tab-pane name="mine">
+          <template #label>我发起的<el-badge v-if="approvedCount" :value="approvedCount" class="tab-badge" type="warning" /></template>
+          <el-table v-loading="mineLoading" :data="mineRows" border stripe size="small" height="56vh">
+            <el-table-column type="index" label="序号" width="56" align="center" />
+            <el-table-column prop="name" label="引用对象" width="100" />
+            <el-table-column prop="idCard" label="身份证号" width="180" />
+            <el-table-column prop="sourceTownLabel" label="被引用乡镇" min-width="170" show-overflow-tooltip />
+            <el-table-column label="落地村组" min-width="150" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.targetVillageName }}{{ row.targetGroupName ? ' / ' + row.targetGroupName : '' }}</template>
+            </el-table-column>
+            <el-table-column label="状态" width="120" align="center">
+              <template #default="{ row }"><el-tag :type="referStatusTag(row.status)">{{ row.statusLabel }}</el-tag></template>
+            </el-table-column>
+            <el-table-column prop="auditRemark" label="审核意见" min-width="140" show-overflow-tooltip />
+            <el-table-column prop="applyTime" label="申请时间" width="150" align="center">
+              <template #default="{ row }">{{ fmtTime(row.applyTime) }}</template>
+            </el-table-column>
+            <el-table-column label="操作" width="150" align="center" fixed="right">
+              <template #default="{ row }">
+                <el-button v-if="row.status === 'APPROVED'" type="success" link @click="includeReq(row)">纳入补贴对象库</el-button>
+                <span v-else style="color:#c0c4cc">—</span>
+              </template>
+            </el-table-column>
+          </el-table>
+          <el-empty v-if="!mineLoading && !mineRows.length" description="暂无发起的引用请求" />
+        </el-tab-pane>
+      </el-tabs>
+    </el-dialog>
+
     <!-- 批量修改：选中数据铺成可编辑表格 -->
     <el-dialog v-model="batchVisible" title="批量修改" fullscreen :close-on-click-modal="false" class="batch-dialog">
       <div class="batch-toolbar">
@@ -128,9 +215,12 @@
 <script setup>
 import { ref, reactive, computed, nextTick, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useRoute } from 'vue-router'
 import { Plus, Edit, Delete, Tickets } from '@element-plus/icons-vue'
 import CrudTable from '../../components/CrudTable.vue'
-import { beneficiaryApi, villageApi, orgApi, bankApi } from '../../api/system'
+import { beneficiaryApi, villageApi, orgApi, bankApi, referReqApi } from '../../api/system'
+
+const route = useRoute()
 
 /* ============ 数据字典 ============ */
 const STATUS_OPTS = [{ label: '0-作废', value: '0' }, { label: '1-正常', value: '1' }, { label: '2-停用', value: '2' }]
@@ -180,6 +270,8 @@ onMounted(async () => {
   villages.value = (await villageApi.list({})) || []
   setOpt('townId', towns.value.map(t => ({ label: `${cMap[String(t.parentId)] || ''} ${t.orgName}`, value: t.id })))
   setOpt('villageId', villages.value.map(v => ({ label: `${v.villageCode}-${v.villageName}`, value: v.id })))
+  refreshReferCount()
+  if (route.query.referReq) openReferReq(route.query.referReq)   // 工作台点入自动开弹窗(mine=我发起的/其它=待我审核)
 })
 
 /* ============ 列表列（对齐生产，含全部富字段）============ */
@@ -251,7 +343,7 @@ const cardFields = [
   { prop: 'farmlandInfo', label: '耕地情况' },
   { prop: 'houseInfo', label: '房屋情况' },
   { prop: 'remark', label: '备注' },
-  { prop: 'createBy', label: '创建人', fmt: v => v || '一卡通' }
+  { prop: 'createBy', label: '创建人', fmt: (v, row) => row?.createByName || '一卡通' }
 ]
 
 /* ============ 修改单据表单（对齐生产 3 列布局）============ */
@@ -402,8 +494,78 @@ async function batchSave() {
 
 const crud = ref()
 const referVisible = ref(false); const referId = ref(''); const referResult = ref(null); const referSearched = ref(false)
-async function doRefer() { referSearched.value = true; referResult.value = await beneficiaryApi.refer(referId.value) }
-function confirmRefer() { crud.value.openForm({ ...referResult.value, id: null, referred: 1 }); referVisible.value = false }
+async function doRefer() {
+  referSearched.value = true
+  const r = await beneficiaryApi.refer(referId.value)
+  // 原属乡镇用后端算好的「县-乡镇」标签（跨县引用时本县下拉 towns 里没有源乡镇，前端自己算不出）
+  if (r) r._ownerLabel = r.townLabel || ''
+  referResult.value = r
+}
+
+// 引用申请：不再即时复制建档，改为填落地村组 + 留言(必填) 后提交请求，交对方乡镇审核确认
+const applyVisible = ref(false); const applySaving = ref(false); const applyForm = ref(null)
+function confirmRefer() {
+  const s = referResult.value
+  applyForm.value = { ...s, villageId: null, groupName: '', message: '' }
+  referVisible.value = false
+  applyVisible.value = true
+}
+async function submitApply() {
+  const f = applyForm.value
+  if (!f.villageId) return ElMessage.warning('请选择落地村(居)委会')
+  if (!f.message || !f.message.trim()) return ElMessage.warning('请填写留言（必填）')
+  applySaving.value = true
+  try {
+    // payload=引用方填好的整条对象；清 id/乡镇归属，referred=1（后端按 villageId 回填 townId）
+    const { message, _ownerLabel, ...rest } = f
+    const payload = { ...rest, id: null, townId: null, referred: 1 }
+    const res = await referReqApi.submit({ payload, message: message.trim(), sourceId: referResult.value?.id })
+    applyVisible.value = false
+    ElMessage.success(`引用申请已提交，待【${res?.sourceTownLabel || '对方乡镇'}】审核确认`)
+  } finally { applySaving.value = false }
+}
+
+/* ============ 引用请求（待我审核 + 我发起的）============ */
+const referReqVisible = ref(false); const reviewTab = ref('pending')
+const referReqRows = ref([]); const referReqLoading = ref(false); const referReqCount = ref(0)   // 被引用乡镇待审
+const mineRows = ref([]); const mineLoading = ref(false); const approvedCount = ref(0)             // 引用方已通过待纳入
+async function refreshReferCount() {
+  try { referReqCount.value = (await referReqApi.count()) || 0 } catch { /* 忽略 */ }
+  try { approvedCount.value = (await referReqApi.approvedCount()) || 0 } catch { /* 忽略 */ }
+}
+async function loadPending() {
+  referReqLoading.value = true
+  try { referReqRows.value = (await referReqApi.pending()) || [] } finally { referReqLoading.value = false }
+}
+async function loadMine() {
+  mineLoading.value = true
+  try { mineRows.value = (await referReqApi.mine()) || [] } finally { mineLoading.value = false }
+}
+async function openReferReq(tab) {
+  reviewTab.value = tab === 'mine' ? 'mine' : 'pending'
+  referReqVisible.value = true
+  loadPending(); loadMine(); refreshReferCount()
+}
+async function approveReq(row) {
+  await ElMessageBox.confirm(`确认引用【${row.name}（${row.idCard}）】到【${row.applyTownLabel}】？确认后由对方乡镇自行纳入建档。`, '确认引用', { type: 'warning' })
+  await referReqApi.approve(row.id)
+  ElMessage.success('已确认，待对方乡镇纳入')
+  loadPending(); refreshReferCount()
+}
+async function rejectReq(row) {
+  const { value } = await ElMessageBox.prompt('拒绝原因（可空）', '拒绝引用', { inputType: 'textarea', confirmButtonText: '确定拒绝', inputPlaceholder: '说明拒绝原因' })
+  await referReqApi.reject(row.id, value)
+  ElMessage.success('已拒绝该引用请求')
+  loadPending(); refreshReferCount()
+}
+async function includeReq(row) {
+  await ElMessageBox.confirm(`将【${row.name}（${row.idCard}）】纳入本乡镇补贴对象库？`, '纳入补贴对象库', { type: 'warning' })
+  await referReqApi.include(row.id)
+  ElMessage.success('已纳入补贴对象库，可正常参与批次录入')
+  loadMine(); refreshReferCount(); crud.value?.reload?.()
+}
+const fmtTime = (t) => t ? String(t).replace('T', ' ').slice(0, 16) : ''
+const referStatusTag = (s) => ({ PENDING: 'info', APPROVED: 'warning', REJECTED: 'danger', INCLUDED: 'success' }[s] || 'info')
 
 /* ============ 导入 / 导出（对齐生产「导入选项」）============ */
 const fileInput = ref(null)
@@ -453,4 +615,6 @@ function saveBlob(blob, filename) {
 .batch-listbar { display: flex; align-items: center; gap: 6px; font-weight: 600; color: #1f5fbf;
   background: #eef5fe; border: 1px solid #d4e4fb; border-bottom: none; padding: 6px 12px; }
 .batch-dialog :deep(.el-dialog__body) { padding-top: 10px; }
+.tab-badge { margin-left: 8px; }
+.tab-badge :deep(.el-badge__content) { position: static; transform: none; }
 </style>

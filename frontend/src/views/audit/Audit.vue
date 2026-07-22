@@ -147,9 +147,12 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Select, Back, RefreshLeft } from '@element-plus/icons-vue'
 import { auditApi, projectApi, queryApi } from '../../api/system'
+
+const route = useRoute()
 
 const tab = ref('pending')
 const tableRef = ref()
@@ -168,6 +171,9 @@ function ensureSelected() {
 onMounted(async () => {
   // tab:'all' 去掉项目审核状态过滤——否则默认 tab=pending 会 ne APPROVED，与 included=1(已纳入即已终审)冲突→无数据
   projects.value = (await projectApi.list({ included: 1, tab: 'all' })) || []
+  // 工作台待办点入：默认选中对应项目/批次（Long 已按字符串序列化，直接用，勿 Number 丢精度）
+  if (route.query.projectId) query.projectId = String(route.query.projectId)
+  if (route.query.batchCode) query.batchCode = String(route.query.batchCode)
   reload()
 })
 

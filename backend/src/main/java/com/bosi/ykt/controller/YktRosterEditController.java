@@ -189,14 +189,18 @@ public class YktRosterEditController {
         return R.ok(grantMapper.selectPage(new Page<>(pageNum, pageSize), w));
     }
 
-    /** 批量填报-候选数据：数据来源 1=家庭成员表(补贴对象库) 2=历史发放数据 */
+    /** 批量填报-候选数据：数据来源 1=补贴对象库 2=历史发放数据。
+     *  batchId 传入时，已在本批次的享受人身份证不再作为候选（同批次人员不可重复）。 */
     @GetMapping("/fill-candidates")
     public R<List<Map<String, Object>>> fillCandidates(@RequestParam(defaultValue = "1") String source,
+                                                        @RequestParam(required = false) Long batchId,
                                                         @RequestParam(required = false) Long villageId,
                                                         @RequestParam(required = false) String beneficiaryName) {
         Long t = tid();
         Map<Long, String> bankName = new HashMap<>();
         bankMapper.selectList(null).forEach(b -> bankName.put(b.getId(), b.getBankName()));
+        // 同批次人员不可重复：已在本批次的享受人身份证集合，候选中剔除
+        Set<String> existed = existingIdCards(batchId);
 
         List<Map<String, Object>> out = new ArrayList<>();
         if ("2".equals(source)) {
@@ -213,6 +217,7 @@ public class YktRosterEditController {
             for (YktGrantDetail d : grantMapper.selectList(w)) {
                 String key = d.getBeneficiaryIdCard();
                 if (key != null && !seen.add(key)) continue;
+                if (key != null && existed.contains(key.trim())) continue;   // 已在本批次，跳过
                 Map<String, Object> m = new LinkedHashMap<>();
                 m.put("holderName", d.getHolderName());
                 m.put("holderIdCard", d.getHolderIdCard());
@@ -240,6 +245,7 @@ public class YktRosterEditController {
             List<YktBeneficiary> people = beneficiaryMapper.selectList(w);
             Map<Long, String> villageName = villageNamesOf(people);
             for (YktBeneficiary p : people) {
+                if (p.getIdCard() != null && existed.contains(p.getIdCard().trim())) continue;   // 已在本批次，跳过
                 Map<String, Object> m = new LinkedHashMap<>();
                 m.put("holderName", p.getHeadName());
                 m.put("holderIdCard", p.getHeadIdCard());
@@ -269,9 +275,13 @@ public class YktRosterEditController {
         List<Map<String, Object>> rows = (List<Map<String, Object>>) body.get("rows");
         if (rows == null || rows.isEmpty()) return R.ok(0);
         YktBatch batch = batchMapper.selectById(batchId);
+        // 同批次人员不可重复：已在批次 + 本次已插入的享受人身份证都进 existed，命中即跳过
+        Set<String> existed = existingIdCards(batchId);
         int seq = nextSortNo(batchId);
         int n = 0;
         for (Map<String, Object> r : rows) {
+            String idc = r.get("beneficiaryIdCard") == null ? "" : String.valueOf(r.get("beneficiaryIdCard")).trim();
+            if (!idc.isEmpty() && !existed.add(idc)) continue;   // 已存在，防重复添加
             YktGrantDetail d = new YktGrantDetail();
             d.setBatchId(batchId);
             d.setBatchCode(batch == null ? null : batch.getBatchCode());
@@ -293,7 +303,11 @@ public class YktRosterEditController {
                 d.setStandard(new BigDecimal(String.valueOf(r.get("standard"))));
             if (r.get("amount") != null && !String.valueOf(r.get("amount")).isBlank())
                 d.setAmount(new BigDecimal(String.valueOf(r.get("amount"))));
-            d.setFillDate(LocalDate.now());
+            d.setRemark(r.get("remark") == null ? null : String.valueOf(r.get("remark")));   // 非字符串强转会 ClassCastException，统一 toString
+            try {   // 前端传畸形日期不应打挂整批保存，兜底当天
+                d.setFillDate(r.get("fillDate") != null && !String.valueOf(r.get("fillDate")).isBlank()
+                        ? LocalDate.parse(String.valueOf(r.get("fillDate"))) : LocalDate.now());
+            } catch (java.time.format.DateTimeParseException ex) { d.setFillDate(LocalDate.now()); }
             grantMapper.insert(d);
             n++;
         }
@@ -463,12 +477,26 @@ public class YktRosterEditController {
         if (!bids.isEmpty())
             for (YktBank b : bankMapper.selectBatchIds(bids)) bankNames.put(b.getId(), b.getBankName());
 
+        // 同批次人员不可重复：统计每个享受人身份证的出现次数（导入可能带入重复，送审时拦截）
+        Map<String, Integer> idcCount = new HashMap<>();
+        for (YktGrantDetail d : details) {
+            String idc = nz(d.getBeneficiaryIdCard());
+            if (!idc.isEmpty()) idcCount.merge(idc, 1, Integer::sum);
+        }
+
         List<String> errs = new ArrayList<>();
         for (YktGrantDetail d : details) {
             String idc = nz(d.getBeneficiaryIdCard());
             String name = nz(d.getBeneficiaryName());
             String head = "排序序号:" + (d.getSortNo() == null ? "" : d.getSortNo())
                     + " 享受人身份证号码：" + idc + " 享受人姓名：" + name + " ";
+            // 身份证在本批次出现多次：逐行报「在本批次中重复」，不再往下比对基础库
+            if (!idc.isEmpty() && idcCount.getOrDefault(idc, 0) > 1) {
+                errs.add("排序序号:" + (d.getSortNo() == null ? "" : d.getSortNo())
+                        + " 享受人身份证号码：" + idc + " 在本批次中重复！");
+                if (errs.size() >= 500) break;
+                continue;
+            }
             if (nz(d.getGroupName()).isEmpty())
                 errs.add(head + "村(居)民小组为空，请核对！");
             YktBeneficiary p = idc.isEmpty() ? null : lib.get(idc);
@@ -872,6 +900,15 @@ public class YktRosterEditController {
             villageMapper.selectBatchIds(vids.subList(i, Math.min(i + 1000, vids.size())))
                     .forEach(v -> villageName.put(v.getId(), v.getVillageName()));
         return villageName;
+    }
+
+    /** 本批次已存在的享受人身份证集合（供批量填报候选剔重 / 保存防重复）。batchId 为空返回空集。 */
+    private Set<String> existingIdCards(Long batchId) {
+        Set<String> s = new HashSet<>();
+        if (batchId == null) return s;
+        for (Object o : grantMapper.selectObjs(scope().select("BENEFICIARY_ID_CARD").eq("BATCH_ID", batchId)))
+            if (o != null && !String.valueOf(o).trim().isEmpty()) s.add(String.valueOf(o).trim());
+        return s;
     }
 
     /** 下一个排序号：MAX+1（count+1 在删过中间行后会与现存序号撞号） */

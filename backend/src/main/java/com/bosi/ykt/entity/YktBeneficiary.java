@@ -69,4 +69,12 @@ public class YktBeneficiary extends BaseEntity {
     /** 是否引用：0/1 */
     private Integer referred;
     private String remark;
+
+    /** 创建人显示名（瞬态：createBy 用户 id 反查 realName，供列表展示，不落库） */
+    @com.baomidou.mybatisplus.annotation.TableField(exist = false)
+    private String createByName;
+
+    /** 原属辖区标签（瞬态：townId → 「县-乡镇」，供引用检索跨县回显，不落库） */
+    @com.baomidou.mybatisplus.annotation.TableField(exist = false)
+    private String townLabel;
 }

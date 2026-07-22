@@ -49,6 +49,18 @@ export const beneficiaryApi = {
   relations: () => request.get('/setup/beneficiary/relations')
 }
 
+// ===== 引用请求审批流（乡镇 A 引用 → 乡镇 B 审核确认）=====
+export const referReqApi = {
+  submit:   (data) => request.post('/setup/refer-request', data),
+  pending:  () => request.get('/setup/refer-request/pending'),          // 被引用乡镇：待我审核
+  count:    () => request.get('/setup/refer-request/pending-count'),
+  approve:  (id) => request.post(`/setup/refer-request/${id}/approve`),
+  reject:   (id, remark) => request.post(`/setup/refer-request/${id}/reject`, { remark }),
+  mine:     () => request.get('/setup/refer-request/mine'),             // 引用方：我发起的(带状态)
+  approvedCount: () => request.get('/setup/refer-request/approved-count'),
+  include:  (id) => request.post(`/setup/refer-request/${id}/include`)  // 引用方：纳入补贴对象库
+}
+
 // ===== 主管部门 =====
 export const projectApi = {
   ...makeCrud('/dept/project'),

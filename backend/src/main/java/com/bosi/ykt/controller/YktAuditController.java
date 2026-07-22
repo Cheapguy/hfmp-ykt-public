@@ -163,6 +163,7 @@ public class YktAuditController {
             m.put("batchName", b.getBatchName());
             m.put("unitName", orgName.get(b.getTownId()));
             m.put("projectName", projName.get(b.getProjectId()));
+            m.put("projectId", b.getProjectId());   // 供工作台待办点入回填项目下拉
             m.put("auditStage", b.getAuditStage());
             m.put("stageLabel", STAGE.getOrDefault(b.getAuditStage(), b.getAuditStage()));
             m.put("status", b.getLastResult());

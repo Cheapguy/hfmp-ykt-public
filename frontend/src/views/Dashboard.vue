@@ -22,71 +22,147 @@
       </ol>
     </section>
 
-    <!-- 待办：部门=待更正 / 乡镇=待编制花名册 -->
-    <section class="panel">
-      <div class="panel-head">
-        <h2 class="panel-title">{{ todoTitle }}</h2>
-        <span class="panel-meta">{{ todos.length }} 项待处理</span>
+    <!-- 待办：只展示「有数据」的面板（无数据自动隐藏），全空时给一句提示 -->
+    <section v-if="visiblePanels.length" class="todos" :class="{ dual: visiblePanels.length > 1 }">
+      <div v-for="p in visiblePanels" :key="p.key" class="panel">
+        <div class="panel-head">
+          <h2 class="panel-title">{{ p.title }}</h2>
+          <span class="panel-meta">{{ p.items.length }} 项待处理</span>
+        </div>
+        <ul class="todo">
+          <li v-for="t in p.items" :key="t.id" @click="p.go(t)">
+            <span class="todo-name">{{ t.batchName }}</span>
+            <span class="chip" :class="tagClass(t.tag)">{{ t.tag || '新增' }}</span>
+            <span class="go">{{ p.goText }}</span>
+          </li>
+        </ul>
       </div>
-      <ul class="todo" v-loading="loading">
-        <li v-for="t in todos" :key="t.id" @click="goItem(t)">
-          <span class="todo-name">{{ t.batchName }}</span>
-          <span class="chip" :class="tagClass(t.tag)">{{ t.tag || '新增' }}</span>
-          <span class="go">{{ goText }}</span>
-        </li>
-        <li v-if="!todos.length && !loading" class="empty">{{ emptyText }}</li>
-      </ul>
+    </section>
+    <section v-else-if="!todoLoading" class="panel empty-all">
+      <div class="empty-all-body">暂无待办事项。</div>
     </section>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { rosterEditApi, correctionApi, auditApi } from '../api/system'
+import { rosterEditApi, correctionApi, auditApi, referReqApi } from '../api/system'
 
 const router = useRouter()
 const steps = ['批次维护', '编制花名册', '业务审核', '生成支付']
-const todos = ref([]); const loading = ref(false)
 const today = new Date().toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' })
 
-// 首页待办按岗位分流：部门经办=待更正 / 部门审核=待审核 / 乡镇等=待编制花名册
 const user = JSON.parse(localStorage.getItem('ykt_user') || '{}')
 const userType = String(user.userType || '')
-const isDeptOp = computed(() => userType === 'DEPT_OP')
-const isAudit = computed(() => userType.endsWith('AUDIT'))   // 部门/乡镇审核岗 → 待审核
-const todoTitle = computed(() => isAudit.value ? '待审核' : isDeptOp.value ? '待更正' : '待编制花名册')
-const goText = computed(() => isAudit.value ? '前往审核 →' : isDeptOp.value ? '前往更正 →' : '前往编制 →')
-const emptyText = computed(() => isAudit.value ? '暂无待审核批次。' : isDeptOp.value ? '暂无待更正批次。' : '暂无待编制花名册，先去主管部门下达批次。')
 
-onMounted(async () => {
-  loading.value = true
-  try {
-    if (isAudit.value) {
-      // 待审核：审核链未终审的批次
-      const res = await auditApi.page({ pageNum: 1, pageSize: 50, tab: 'pending' })
-      todos.value = (res?.records || []).map(b => ({ id: b.id, batchName: b.batchName || b.batchCode, tag: b.status || '待审核' }))
-    } else if (isDeptOp.value) {
-      // 待更正：退回/支付失败明细，按批次去重
-      const list = (await correctionApi.list({})) || []
-      const seen = new Set(); const out = []
-      for (const d of list) {
-        if (!d.batchCode || seen.has(d.batchCode)) continue
-        seen.add(d.batchCode)
-        out.push({ id: d.batchCode, batchName: d.batchName || d.batchCode, tag: '更正' })
-      }
-      todos.value = out
-    } else {
-      todos.value = (await rosterEditApi.pending()) || []
+// —— 待办面板工厂：各自带 items/loading + 独立数据源 ——
+// 待更正：退回/支付失败明细，按批次去重
+function correctionPanel() {
+  return reactive({
+    key: 'correction', title: '待更正', goText: '前往更正 →', emptyText: '暂无待更正批次。',
+    items: [], loading: false,
+    // 点入更正发放：带项目+批次，页面默认选中
+    go: (t) => router.push({ path: '/dept/correction', query: { projectId: t.projectId, batchCode: t.id } }),
+    async load() {
+      this.loading = true
+      try {
+        const list = (await correctionApi.list({})) || []
+        const seen = new Set(); const out = []
+        for (const d of list) {
+          if (!d.batchCode || seen.has(d.batchCode)) continue
+          seen.add(d.batchCode)
+          out.push({ id: d.batchCode, batchName: d.batchName || d.batchCode, tag: '更正', projectId: d.projectId })
+        }
+        this.items = out
+      } finally { this.loading = false }
     }
-  } finally { loading.value = false }
-})
-
-function goItem(t) {
-  if (isAudit.value) router.push({ path: '/dept/audit/review' })
-  else if (isDeptOp.value) router.push({ path: '/dept/correction' })
-  else router.push({ path: '/roster/edit', query: { batchId: t.id } })
+  })
 }
+// 待审核：审核链未终审的批次
+function auditPanel() {
+  return reactive({
+    key: 'audit', title: '待审核', goText: '前往审核 →', emptyText: '暂无待审核批次。',
+    items: [], loading: false,
+    // 点入发放数据审核：带项目+批次编码，页面默认选中
+    go: (t) => router.push({ path: '/dept/audit/review', query: { projectId: t.projectId, batchCode: t.batchCode } }),
+    async load() {
+      this.loading = true
+      try {
+        const res = await auditApi.page({ pageNum: 1, pageSize: 50, tab: 'pending' })
+        this.items = (res?.records || []).map(b => ({
+          id: b.id, batchName: b.batchName || b.batchCode, tag: b.status || '待审核',
+          projectId: b.projectId, batchCode: b.batchCode
+        }))
+      } finally { this.loading = false }
+    }
+  })
+}
+// 待编制花名册（乡镇经办）
+function rosterPanel() {
+  return reactive({
+    key: 'roster', title: '待编制花名册', goText: '前往编制 →',
+    emptyText: '暂无待编制花名册，先去主管部门下达批次。',
+    items: [], loading: false,
+    go: (t) => router.push({ path: '/roster/edit', query: { batchId: t.id } }),
+    async load() {
+      this.loading = true
+      try { this.items = (await rosterEditApi.pending()) || [] }
+      finally { this.loading = false }
+    }
+  })
+}
+
+// 待审引用（被引用乡镇）：他乡镇引用本乡镇名下补贴对象的待批请求
+function referPanel() {
+  return reactive({
+    key: 'refer', title: '待审引用', goText: '前往审核 →',
+    emptyText: '暂无待审引用请求。',
+    items: [], loading: false,
+    go: () => router.push({ path: '/setup/beneficiary', query: { referReq: 'pending' } }),
+    async load() {
+      this.loading = true
+      try {
+        this.items = ((await referReqApi.pending()) || []).map(r => ({
+          id: r.id, batchName: `${r.name || ''}（${r.idCard || ''}）`, tag: '待审核'
+        }))
+      } finally { this.loading = false }
+    }
+  })
+}
+
+// 引用已通过·待纳入（引用方通知）：对方乡镇审核通过后，本乡镇需点「纳入补贴对象库」才入库
+function referIncludePanel() {
+  return reactive({
+    key: 'refer-include', title: '引用已通过·待纳入', goText: '前往纳入 →',
+    emptyText: '暂无待纳入的引用。',
+    items: [], loading: false,
+    go: () => router.push({ path: '/setup/beneficiary', query: { referReq: 'mine' } }),
+    async load() {
+      this.loading = true
+      try {
+        this.items = ((await referReqApi.mine()) || [])
+          .filter(r => r.status === 'APPROVED')
+          .map(r => ({ id: r.id, batchName: `${r.name || ''}（${r.idCard || ''}）`, tag: '已通过' }))
+      } finally { this.loading = false }
+    }
+  })
+}
+
+// 主管部门(经办岗)全包更正+审核 → 并排两块；审核岗看待审核；乡镇经办看待编制 + 待审引用 + 已通过待纳入(它持补贴对象维护菜单，既是审批方也是引用方)
+function pickPanels() {
+  if (userType === 'DEPT_OP') return [correctionPanel(), auditPanel()]
+  if (userType === 'TOWN_OP') return [rosterPanel(), referPanel(), referIncludePanel()]
+  if (userType.endsWith('AUDIT')) return [auditPanel()]
+  return [rosterPanel()]
+}
+const panels = ref(pickPanels())
+// 只显示有数据的面板；加载中不算空（避免闪一下「暂无待办」）
+const visiblePanels = computed(() => panels.value.filter(p => p.items.length > 0))
+const todoLoading = computed(() => panels.value.some(p => p.loading))
+
+onMounted(() => { panels.value.forEach(p => p.load()) })
+
 function tagClass(s) {
   if (!s) return 'tag-new'
   return s.includes('退回') || s.includes('更正') ? 'tag-back' : 'tag-new'
@@ -170,6 +246,14 @@ function tagClass(s) {
 .node:hover .disc { transform: translateY(-3px); box-shadow: 0 8px 18px -8px rgba(60, 50, 30, 0.25); }
 .node .name { font-size: 14px; color: var(--sub); }
 .node.first .name { color: var(--ink); font-weight: 600; }
+
+/* 全空占位 */
+.empty-all-body { padding: 28px; color: var(--weak); font-size: 14px; }
+
+/* 待办分栏：主管部门 待更正 + 待审核 并排 */
+.todos { display: grid; grid-template-columns: 1fr; gap: 32px; }
+.todos.dual { grid-template-columns: 1fr 1fr; }
+@media (max-width: 900px) { .todos.dual { grid-template-columns: 1fr; } }
 
 /* 待办列表 */
 .todo { list-style: none; margin: 0; padding: 6px 0; }
