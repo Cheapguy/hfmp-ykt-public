@@ -70,12 +70,9 @@ public class YktBatchController extends BaseCrudController<YktBatchMapper, YktBa
         return R.ok(out);
     }
 
-    /** 县域越权兜底（写路径）：目标乡镇不在本人可见范围则拒（管理员/全部 allowedTowns=null 放行）。 */
+    /** 县域越权兜底（写路径）：委托 DataScopeResolver 单一真源。 */
     private void assertTownScope(Long townId) {
-        Set<Long> towns = dataScope.allowedTowns();
-        if (towns == null) return;
-        if (townId == null || !towns.contains(townId))
-            throw new BizException("无权操作该批次（非本县数据）");
+        dataScope.assertTown(townId, "该批次");
     }
 
     /** 按批次 id 兜底：反查现存批次的乡镇后校验。 */

@@ -304,11 +304,9 @@ public class YktReferRequestController {
         return r;
     }
 
-    /** 目标乡镇须在本人辖区（管理员 allowedTowns=null 放行）。 */
+    /** 目标乡镇须在本人辖区：委托 DataScopeResolver 单一真源。 */
     private void assertInScope(Long townId) {
-        Set<Long> towns = dataScope.allowedTowns();
-        if (towns == null) return;
-        if (townId == null || !towns.contains(townId)) throw new BizException("无权操作该引用请求（非本辖区数据）");
+        dataScope.assertTown(townId, "该引用请求");
     }
 
     private String realName(Long uid) {

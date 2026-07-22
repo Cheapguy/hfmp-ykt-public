@@ -78,21 +78,15 @@ public class YktAuditController {
     /** 审核链顺序（含 DRAFT=乡镇经办送审前；用于判定"已流过本岗"）。 */
     private static final List<String> CHAIN = List.of("DRAFT", "TOWN_AUDIT", "DEPT_OP", "DEPT_REVIEW", "DONE");
 
-    /** 县域越权兜底：批次乡镇不在本人可见范围则拒（同岗跨县批次不可审）。 */
+    /** 县域越权兜底：批次乡镇不在本人可见范围则拒（同岗跨县批次不可审）。委托单一真源。 */
     private void assertScope(YktBatch b) {
-        java.util.Set<Long> towns = dataScope.allowedTowns();
-        if (towns == null) return;
-        if (b.getTownId() == null || !towns.contains(b.getTownId()))
-            throw new BizException("无权操作批次[" + b.getBatchName() + "]（非本县数据）");
+        dataScope.assertTown(b == null ? null : b.getTownId(),
+                "批次[" + (b == null ? "" : b.getBatchName()) + "]");
     }
 
-    /** 读路径按批次 id 兜底（history/rosters/check-bank 等直连 id 的接口）。 */
+    /** 读路径按批次 id 兜底（history/rosters/check-bank 等直连 id 的接口）。委托单一真源。 */
     private void assertScopeById(Long batchId) {
-        java.util.Set<Long> towns = dataScope.allowedTowns();
-        if (towns == null) return;
-        YktBatch b = batchId == null ? null : batchMapper.selectById(batchId);
-        if (b == null || b.getTownId() == null || !towns.contains(b.getTownId()))
-            throw new BizException("无权访问该批次（非本县数据）");
+        dataScope.assertBatch(batchId, "该批次");
     }
 
     /** 当前用户经手的阶段：null=管理员(不限)；""=非审核链岗(无待审/已审)；否则=具体 auditStage。 */

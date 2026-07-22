@@ -503,13 +503,9 @@ public class YktPaymentApplyController {
         return out;
     }
 
-    /** 县域越权兜底：批次乡镇不在本人可见范围则拒（管理员/全部 allowedTowns=null 放行）。 */
+    /** 县域越权兜底：委托 DataScopeResolver 单一真源。 */
     private void assertScope(Long batchId) {
-        Set<Long> towns = dataScope.allowedTowns();
-        if (towns == null) return;
-        YktBatch b = batchId == null ? null : batchMapper.selectById(batchId);
-        if (b == null || b.getTownId() == null || !towns.contains(b.getTownId()))
-            throw new BizException("无权操作该批次（非本县数据）");
+        dataScope.assertBatch(batchId, "该批次");
     }
 
     private QueryWrapper<YktGrantDetail> grantScope(Long batchId) {

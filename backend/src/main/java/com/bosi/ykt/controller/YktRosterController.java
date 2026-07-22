@@ -36,13 +36,9 @@ public class YktRosterController {
     private final YktBatchMapper batchMapper;
     private final com.bosi.ykt.security.DataScopeResolver dataScope;
 
-    /** 县域越权兜底：花名册经批次归乡镇，校验批次乡镇在本人可见范围内（allowedTowns=null 即 ALL 放行）。 */
+    /** 县域越权兜底：花名册经批次归乡镇，委托 DataScopeResolver 单一真源。 */
     private void assertBatchScope(Long batchId) {
-        Set<Long> towns = dataScope.allowedTowns();
-        if (towns == null) return;
-        YktBatch b = batchId == null ? null : batchMapper.selectById(batchId);
-        if (b == null || b.getTownId() == null || !towns.contains(b.getTownId()))
-            throw new BizException("无权操作该花名册（非本县数据）");
+        dataScope.assertBatch(batchId, "该花名册");
     }
 
     /** 按花名册 id 反查其批次乡镇后校验（防直连传别县 rosterId）。返回现存记录。 */

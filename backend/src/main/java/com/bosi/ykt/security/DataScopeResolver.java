@@ -2,16 +2,19 @@ package com.bosi.ykt.security;
 
 import com.baomidou.mybatisplus.core.conditions.AbstractWrapper;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.bosi.ykt.common.BizException;
 import com.bosi.ykt.entity.SysOrg;
 import com.bosi.ykt.entity.SysRole;
 import com.bosi.ykt.entity.SysUser;
 import com.bosi.ykt.entity.SysUserProject;
 import com.bosi.ykt.entity.SysUserRole;
+import com.bosi.ykt.entity.YktBatch;
 import com.bosi.ykt.mapper.SysOrgMapper;
 import com.bosi.ykt.mapper.SysRoleMapper;
 import com.bosi.ykt.mapper.SysUserMapper;
 import com.bosi.ykt.mapper.SysUserProjectMapper;
 import com.bosi.ykt.mapper.SysUserRoleMapper;
+import com.bosi.ykt.mapper.YktBatchMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
@@ -43,6 +46,7 @@ public class DataScopeResolver {
     private final SysUserRoleMapper userRoleMapper;
     private final SysRoleMapper roleMapper;
     private final SysUserProjectMapper userProjectMapper;
+    private final YktBatchMapper batchMapper;
 
     public enum Scope { ALL, COUNTY, OWN_ORG }
 
@@ -237,6 +241,32 @@ public class DataScopeResolver {
         if (c.scope == Scope.ALL) return null;
         if (c.scope == Scope.OWN_ORG) return c.ownTownId == null ? Set.of() : Set.of(c.ownTownId);
         return new HashSet<>(c.countyTownIds == null ? List.of() : c.countyTownIds);
+    }
+
+    // ============ 写路径越权兜底（单一真源） ============
+    // 读取面由 apply* 在 SQL 层收窄；写入面（create/update/delete 及各审批推进）按目标乡镇逐一断言。
+    // 以下三个方法是全工程写路径校验的唯一实现，各控制器的 assertXxx 一律委托到此，
+    // 避免「allowedTowns()==null 放行 + contains + throw」在十余处各抄一份、口径漂移成越权盲区。
+
+    /** 越权兜底判定：管理员(allowedTowns()==null) 放行；否则 townId 必须落在允许乡镇集内。 */
+    public boolean townInScope(Long townId) {
+        Set<Long> towns = allowedTowns();
+        return towns == null || (townId != null && towns.contains(townId));
+    }
+
+    /** 越权兜底断言：目标乡镇不在范围抛 BizException。label 拼进文案，如「该批次」「该补贴对象」。 */
+    public void assertTown(Long townId, String label) {
+        if (!townInScope(townId)) throw new BizException("无权操作" + label + "（非本县数据）");
+    }
+
+    /**
+     * 经批次 id 反查乡镇后兜底（本表无 townId、只握 batchId 的接口用，如花名册/更正/支付）。
+     * 管理员免查直接放行；非管理员批次不存在按越权处理（防直连传别县 batchId 探测）。
+     */
+    public void assertBatch(Long batchId, String label) {
+        if (allowedTowns() == null) return;   // 管理员：免一次 selectById
+        YktBatch b = batchId == null ? null : batchMapper.selectById(batchId);
+        assertTown(b == null ? null : b.getTownId(), label);
     }
 
     /** "= x" 或 "IN (...)"；COUNTY 空集用 "IN (-1)" 防语法错并保证零结果。 */

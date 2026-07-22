@@ -66,6 +66,7 @@ public abstract class BaseCrudController<M extends BaseMapper<E>, E> {
 
     @PostMapping
     public R<?> create(@RequestBody E entity) {
+        assertWritable(entity);   // 与 update/delete 对齐：新建也须过归属兜底，防越权在别县建数据（create 无"原归属"，请求体 townId 即目标，直接校验正确）
         getMapper().insert(entity);
         return R.ok(entity);
     }

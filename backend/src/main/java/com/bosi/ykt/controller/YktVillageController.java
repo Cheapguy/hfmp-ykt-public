@@ -37,11 +37,9 @@ public class YktVillageController extends BaseCrudController<YktVillageMapper, Y
         return w;
     }
 
-    /** 县域越权兜底（写路径）：目标乡镇不在本人可见范围则拒。 */
+    /** 县域越权兜底（写路径）：委托 DataScopeResolver 单一真源。 */
     private void assertTownScope(Long townId) {
-        Set<Long> towns = dataScope.allowedTowns();
-        if (towns == null) return;
-        if (townId == null || !towns.contains(townId)) throw new BizException("无权操作该村组（非本县数据）");
+        dataScope.assertTown(townId, "该村组");
     }
 
     /** 按 id 兜底：反查现存记录的乡镇后校验。 */
