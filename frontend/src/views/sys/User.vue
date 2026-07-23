@@ -2,7 +2,7 @@
   <div>
     <h2 class="page-title">用户管理</h2>
     <CrudTable ref="crud" :api="userApi" :columns="columns" :search-fields="searchFields"
-      :form-fields="formFields" :form-rules="rules" form-width="640px" action-width="220">
+      :form-fields="formFields" :form-rules="rules" form-width="640px" action-width="220" :detail-before-edit="true">
       <template #column-userType="{ value }">{{ UTYPE[value] || value }}</template>
       <template #column-status="{ value }">
         <el-tag :type="value === 1 ? 'success' : 'info'">{{ value === 1 ? '启用' : '禁用' }}</el-tag>
@@ -18,7 +18,7 @@
         </el-select>
       </template>
       <template #row-actions="{ row }">
-        <el-button type="primary" link @click="openEdit(row)">编辑</el-button>
+        <el-button type="primary" link @click="crud.editRow(row)">编辑</el-button>
         <el-button type="success" link @click="openData(row)">分配数据</el-button>
         <el-button type="warning" link @click="onReset(row)">重置密码</el-button>
         <el-button type="danger" link @click="crud.handleDelete(row)">删除</el-button>
@@ -103,13 +103,8 @@ const rules = {
   realName: [{ required: true, message: '请输入姓名', trigger: 'blur' }]
 }
 
-// 编辑前先拉详情：/page 不返回 roleIds，直接用列表行会让角色选择器空白，
-// 保存时又以空 roleIds 覆盖 → 静默清掉用户已绑角色。故编辑必须走 detail 带出 roleIds。
-async function openEdit(row) {
-  const d = await userApi.detail(row.id)
-  crud.value.openForm(d || row)
-}
-
+// 编辑前拉详情带出 roleIds 的逻辑已内建到 CrudTable（:detail-before-edit + crud.editRow）：
+// /page 不返回 roleIds，直接用列表行会让角色选择器空白、保存又以空值覆盖 → 静默清角色。
 async function onReset(row) {
   await ElMessageBox.confirm(`将 ${row.username} 的密码重置为 123456？`, '提示', { type: 'warning' })
   await userRoleApi.resetPwd(row.id)

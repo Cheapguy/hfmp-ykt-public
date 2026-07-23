@@ -88,7 +88,7 @@
         <el-table-column v-if="enableEdit || enableDelete || $slots['row-actions']" label="操作" :width="actionWidth" align="center" fixed="right">
           <template #default="{ row }">
             <slot name="row-actions" :row="row">
-              <el-button v-if="enableEdit" type="primary" link @click.stop="openForm(row)">编辑</el-button>
+              <el-button v-if="enableEdit" type="primary" link @click.stop="editRow(row)">编辑</el-button>
               <el-button v-if="enableDelete" type="danger" link @click.stop="handleDelete(row)">删除</el-button>
             </slot>
           </template>
@@ -153,6 +153,9 @@ const props = defineProps({
   enableEdit: { type: Boolean, default: true },
   enableDelete: { type: Boolean, default: true },
   readonlyOnEdit: { type: Array, default: () => [] },
+  // 编辑前先拉 api.detail(id) 再开表单：/page 常不返回多对多关联(roleIds/menuIds 等)，
+  // 直接拿列表行进表单会让关联选择器空白，保存又以空值覆盖 → 静默清关联(见 User 角色被清史)。
+  detailBeforeEdit: { type: Boolean, default: false },
   autoLoad: { type: Boolean, default: true },
   selectable: { type: Boolean, default: false },
   pageSize: { type: Number, default: 10 },
@@ -261,6 +264,15 @@ function openForm(row) {
   }
   formVisible.value = true
 }
+// 编辑入口：detailBeforeEdit 开时先拉完整详情（带出关联字段）再开表单；
+// 拉取失败则不打开表单（拦截器已弹错），避免用残缺列表行保存覆盖掉关联字段。
+async function editRow(row) {
+  if (!(props.detailBeforeEdit && props.api.detail)) { openForm(row); return }
+  try {
+    const d = await props.api.detail(row[props.idKey])
+    openForm(d || row)
+  } catch (e) { /* 拦截器已弹错；不开表单，防残缺数据覆盖关联 */ }
+}
 function handleFormClosed() { formRef.value?.resetFields?.(); formData.value = {} }
 
 async function handleSave() {
@@ -314,7 +326,7 @@ function rowClassName({ row }) { return isSelected(row) ? 'crud-row-selected' : 
 
 watch(() => props.extraQuery, () => { page.pageNum = 1; loadData() }, { deep: true })
 onMounted(() => { if (props.autoLoad) loadData() })
-defineExpose({ reload: loadData, openForm, handleDelete, getSelection: () => selection.value, clearSelection })
+defineExpose({ reload: loadData, openForm, editRow, handleDelete, getSelection: () => selection.value, clearSelection })
 </script>
 
 <style scoped>
@@ -336,13 +348,13 @@ defineExpose({ reload: loadData, openForm, handleDelete, getSelection: () => sel
 .crud-pager { display: flex; justify-content: flex-end; margin-top: 12px; }
 .form-tip { color: #909399; font-size: 12px; line-height: 1.4; margin-top: 2px; }
 
-/* 数据列表 标题栏 */
+/* 数据列表 标题栏（主色走赤陶橙主题变量，禁写死政务蓝） */
 .crud-listbar { display: flex; justify-content: space-between; align-items: center;
-  background: #eef5fe; border: 1px solid #d4e4fb; border-bottom: none; padding: 6px 12px; }
-.crud-listbar .lb-title { display: flex; align-items: center; gap: 6px; font-weight: 600; color: #1f5fbf; font-size: 14px; }
+  background: var(--el-color-primary-light-9); border: 1px solid var(--el-color-primary-light-7); border-bottom: none; padding: 6px 12px; }
+.crud-listbar .lb-title { display: flex; align-items: center; gap: 6px; font-weight: 600; color: var(--el-color-primary-dark-2); font-size: 14px; }
 .crud-listbar .lb-tools { display: flex; align-items: center; gap: 14px; }
-.crud-listbar .lb-ico { cursor: pointer; color: #1f5fbf; font-size: 18px; }
-.crud-listbar .lb-ico:hover { color: #0a3d8f; }
+.crud-listbar .lb-ico { cursor: pointer; color: var(--el-color-primary); font-size: 18px; }
+.crud-listbar .lb-ico:hover { color: var(--el-color-primary-dark-2); }
 
 /* 列表内部检索弹窗 */
 .inline-search .is-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; color: #303133; font-size: 13px; }

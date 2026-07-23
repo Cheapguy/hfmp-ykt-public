@@ -612,8 +612,8 @@ function saveBlob(blob, filename) {
 .import-row { display: flex; gap: 8px; align-items: center; }
 .log-bar { margin-bottom: 10px; }
 .batch-toolbar { margin-bottom: 10px; }
-.batch-listbar { display: flex; align-items: center; gap: 6px; font-weight: 600; color: #1f5fbf;
-  background: #eef5fe; border: 1px solid #d4e4fb; border-bottom: none; padding: 6px 12px; }
+.batch-listbar { display: flex; align-items: center; gap: 6px; font-weight: 600; color: var(--el-color-primary-dark-2);
+  background: var(--el-color-primary-light-9); border: 1px solid var(--el-color-primary-light-7); border-bottom: none; padding: 6px 12px; }
 .batch-dialog :deep(.el-dialog__body) { padding-top: 10px; }
 .tab-badge { margin-left: 8px; }
 .tab-badge :deep(.el-badge__content) { position: static; transform: none; }
