@@ -244,6 +244,9 @@ async function loadData() {
     rows.value = res?.records || []
     page.total = Number(res?.total) || 0  // 后端 Long→String 全局序列化, el-pagination 的 total 必须是 number 否则整个分页器不渲染
     emit('loaded', { rows: rows.value, total: page.total })
+    // 数据刷新后按新行重算并重发选中集：否则外部「修改」按钮(editSel→openForm(sel[0]))
+    // 拿到的还是勾选那一刻的旧行对象，保存后再编辑弹出的是改前的旧值。
+    emitSelection()
   } catch (e) { /* 拦截器已弹错 */ } finally { loading.value = false }
 }
 function trimParams(obj) {

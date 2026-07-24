@@ -191,7 +191,8 @@ public class YktRosterEditController {
     public R<List<Map<String, Object>>> fillCandidates(@RequestParam(defaultValue = "1") String source,
                                                         @RequestParam(required = false) Long batchId,
                                                         @RequestParam(required = false) Long villageId,
-                                                        @RequestParam(required = false) String beneficiaryName) {
+                                                        @RequestParam(required = false) String beneficiaryName,
+                                                        @RequestParam(defaultValue = "HOUSEHOLD") String payeeMode) {
         Long t = tid();
         Map<Long, String> bankName = new HashMap<>();
         bankMapper.selectList(null).forEach(b -> bankName.put(b.getId(), b.getBankName()));
@@ -240,15 +241,39 @@ public class YktRosterEditController {
             w.last("and rownum <= 500");
             List<YktBeneficiary> people = beneficiaryMapper.selectList(w);
             Map<Long, String> villageName = villageNamesOf(people);
+            // 收款人绑定：HOUSEHOLD=到户(默认，收款人=户主本人账户) / PERSON=到人(收款人=家庭成员本人账户)。
+            // 到户时需按户主身份证载入户主档案取其账户（户主也是补贴对象里 relation=本人 的一行）。
+            boolean toHousehold = !"PERSON".equals(payeeMode);
+            Map<String, YktBeneficiary> headMap = new HashMap<>();
+            if (toHousehold) {
+                Set<String> headIdcs = new LinkedHashSet<>();
+                for (YktBeneficiary p : people)
+                    if (p.getHeadIdCard() != null && !p.getHeadIdCard().isBlank()) headIdcs.add(p.getHeadIdCard().trim());
+                List<String> hl = new ArrayList<>(headIdcs);
+                for (int i = 0; i < hl.size(); i += 1000) {
+                    QueryWrapper<YktBeneficiary> hw = new QueryWrapper<>();
+                    if (t != null) hw.eq("TENANT_ID", t);
+                    hw.eq("STATUS", "1").in("ID_CARD", hl.subList(i, Math.min(i + 1000, hl.size())));
+                    for (YktBeneficiary h : beneficiaryMapper.selectList(hw))
+                        if (h.getIdCard() != null) headMap.putIfAbsent(h.getIdCard().trim(), h);
+                }
+            }
             for (YktBeneficiary p : people) {
                 if (p.getIdCard() != null && existed.contains(p.getIdCard().trim())) continue;   // 已在本批次，跳过
+                // 收款人账户来源：到户取户主档案（缺失则回落成员本人），到人取成员本人
+                YktBeneficiary payer = p;
+                if (toHousehold && p.getHeadIdCard() != null) {
+                    YktBeneficiary h = headMap.get(p.getHeadIdCard().trim());
+                    if (h != null) payer = h;
+                }
                 Map<String, Object> m = new LinkedHashMap<>();
                 m.put("holderName", p.getHeadName());
                 m.put("holderIdCard", p.getHeadIdCard());
-                m.put("payeeName", p.getAccountName() != null ? p.getAccountName() : p.getName());
-                m.put("payeeIdCard", p.getIdCard());
-                m.put("bankAccount", p.getBankAccount());
-                m.put("bankName", bankName.get(p.getBankId()));
+                m.put("payeeName", payer.getAccountName() != null && !payer.getAccountName().isBlank()
+                        ? payer.getAccountName() : payer.getName());
+                m.put("payeeIdCard", payer.getIdCard());
+                m.put("bankAccount", payer.getBankAccount());
+                m.put("bankName", bankName.get(payer.getBankId()));
                 m.put("villageName", villageName.get(p.getVillageId()));
                 m.put("groupName", p.getGroupName());
                 m.put("beneficiaryName", p.getName());
@@ -452,11 +477,15 @@ public class YktRosterEditController {
         if (details.isEmpty()) throw new BizException("花名册为空，无法送审");
 
         Long t = tid();
-        // 只查本批次明细涉及的身份证（≤1000 一组分批 IN），不把全州对象库载入内存
-        List<String> idcs = details.stream()
-                .map(YktGrantDetail::getBeneficiaryIdCard)
-                .filter(Objects::nonNull).map(String::trim).filter(s -> !s.isEmpty())
-                .distinct().toList();
+        // 只查本批次明细涉及的身份证（享受人 + 收款人；收款人可能是户主，账户核对要拿户主的库记录）（≤1000 一组分批 IN）
+        Set<String> idcSet = new LinkedHashSet<>();
+        for (YktGrantDetail d : details) {
+            String bi = nz(d.getBeneficiaryIdCard()).trim();
+            String pi = nz(d.getPayeeIdCard()).trim();
+            if (!bi.isEmpty()) idcSet.add(bi);
+            if (!pi.isEmpty()) idcSet.add(pi);
+        }
+        List<String> idcs = new ArrayList<>(idcSet);
         Map<String, YktBeneficiary> lib = new HashMap<>();
         for (int i = 0; i < idcs.size(); i += 1000) {
             QueryWrapper<YktBeneficiary> bw = new QueryWrapper<>();
@@ -504,13 +533,25 @@ public class YktRosterEditController {
             } else {
                 if (!same(d.getHolderName(), p.getHeadName()) || !same(d.getHolderIdCard(), p.getHeadIdCard()))
                     errs.add(head + "对应的户主信息与补贴对象基础库信息不一致！");
-                String libPayee = p.getAccountName() != null && !p.getAccountName().isBlank()
-                        ? p.getAccountName() : p.getName();
-                String libBank = p.getBankId() == null ? "" : nz(bankNames.get(p.getBankId()));
-                if (!same(d.getPayeeName(), libPayee) || !same(d.getPayeeIdCard(), p.getIdCard())
-                        || !same(d.getBankAccount(), p.getBankAccount())
-                        || !same(d.getBankName(), libBank))
-                    errs.add(head + "对应收款账户信息与补贴对象基础库信息不一致！");
+                // 收款人可为「享受人本人」或「本户户主」（补贴打到户主账户是合法场景）：
+                // 账户须与「收款人本人」的补贴对象记录一致——本人比享受人记录，户主比户主记录，而不是一律死磕享受人。
+                String payeeIdc = nz(d.getPayeeIdCard()).trim();
+                boolean payeeIsSelf = !payeeIdc.isEmpty() && same(payeeIdc, p.getIdCard());
+                boolean payeeIsHead = !payeeIdc.isEmpty() && same(payeeIdc, p.getHeadIdCard());
+                YktBeneficiary payeeRef = payeeIsSelf ? p : (payeeIsHead ? lib.get(payeeIdc) : null);
+                if (!payeeIsSelf && !payeeIsHead) {
+                    errs.add(head + "收款人须为享受人本人或本户户主，请核对！");
+                } else if (payeeRef == null) {
+                    errs.add(head + "收款人（户主）在补贴对象基础库缺失或非正常状态，无法核对收款账户，请先维护户主档案！");
+                } else {
+                    String libPayee = payeeRef.getAccountName() != null && !payeeRef.getAccountName().isBlank()
+                            ? payeeRef.getAccountName() : payeeRef.getName();
+                    String libBank = payeeRef.getBankId() == null ? "" : nz(bankNames.get(payeeRef.getBankId()));
+                    if (!same(d.getPayeeName(), libPayee) || !same(d.getPayeeIdCard(), payeeRef.getIdCard())
+                            || !same(d.getBankAccount(), payeeRef.getBankAccount())
+                            || !same(d.getBankName(), libBank))
+                        errs.add(head + "对应收款账户信息与补贴对象基础库信息不一致！");
+                }
                 if (!same(name, p.getName()))
                     errs.add(head + "在补贴对象基础库信息缺失或者不一致！");
             }

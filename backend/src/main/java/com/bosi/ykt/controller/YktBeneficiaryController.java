@@ -2,6 +2,7 @@ package com.bosi.ykt.controller;
 
 import com.alibaba.excel.EasyExcel;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.bosi.ykt.common.BaseCrudController;
 import com.bosi.ykt.common.BizException;
 import com.bosi.ykt.common.R;
@@ -9,11 +10,13 @@ import com.bosi.ykt.entity.SysOrg;
 import com.bosi.ykt.entity.SysUser;
 import com.bosi.ykt.entity.YktBank;
 import com.bosi.ykt.entity.YktBeneficiary;
+import com.bosi.ykt.entity.YktGrantDetail;
 import com.bosi.ykt.entity.YktVillage;
 import com.bosi.ykt.mapper.SysOrgMapper;
 import com.bosi.ykt.mapper.SysUserMapper;
 import com.bosi.ykt.mapper.YktBankMapper;
 import com.bosi.ykt.mapper.YktBeneficiaryMapper;
+import com.bosi.ykt.mapper.YktGrantDetailMapper;
 import com.bosi.ykt.mapper.YktVillageMapper;
 import com.bosi.ykt.security.UserContext;
 import jakarta.servlet.http.HttpServletResponse;
@@ -46,6 +49,7 @@ public class YktBeneficiaryController extends BaseCrudController<YktBeneficiaryM
     private final YktBeneficiaryMapper mapper;
     private final YktVillageMapper villageMapper;
     private final YktBankMapper bankMapper;
+    private final YktGrantDetailMapper grantDetailMapper;
     private final SysUserMapper userMapper;
     private final SysOrgMapper orgMapper;
     private final com.bosi.ykt.security.DataScopeResolver dataScope;
@@ -163,6 +167,7 @@ public class YktBeneficiaryController extends BaseCrudController<YktBeneficiaryM
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public R<?> update(@org.springframework.web.bind.annotation.RequestBody YktBeneficiary e) {
         if (e.getId() == null) throw new com.bosi.ykt.common.BizException("缺少 id");
         YktBeneficiary old = assertExisting(e.getId());
@@ -176,7 +181,49 @@ public class YktBeneficiaryController extends BaseCrudController<YktBeneficiaryM
                 throw new BizException("家庭成员姓名：" + d.getName() + "，身份证号码：" + d.getIdCard()
                         + " 在系统中(" + ownerLabel(d.getTownId()) + ")已存在！");
         }
-        return super.update(e);
+        R<?> r = super.update(e);
+        // 信息回流：补贴对象改动后，把该人在「未送审(可编辑 ISSUED)」批次花名册里的人员/银行字段刷成最新，
+        // 免去以前「删了重加才更新」的手工操作。已送审/发送/支付批次是冻结快照，不动。
+        syncEditableRosters(mapper.selectById(e.getId()), old.getIdCard());
+        return r;
+    }
+
+    /**
+     * 把补贴对象最新信息回流到该人「可编辑(ISSUED)」批次的花名册明细。
+     * - 匹配键用**旧身份证号** + 本乡镇：既命中现存明细，又让「改身份证号」也能同步；限本乡镇防同证跨乡镇引用副本互相串改。
+     * - 只覆盖来自补贴对象的人员/银行字段；花名册本地填的金额/标准/排序/备注/停发/发放次数一律保留。
+     * - 用 UpdateWrapper 逐列 set（含 null），保证与补贴对象**精确一致**（清空的字段也同步清空）；MP updateById 会吞 null。
+     */
+    private void syncEditableRosters(YktBeneficiary b, String oldIdCard) {
+        if (b == null || oldIdCard == null || oldIdCard.isBlank() || b.getTownId() == null) return;
+        List<YktGrantDetail> details = grantDetailMapper.selectList(new QueryWrapper<YktGrantDetail>()
+                .eq("BENEFICIARY_ID_CARD", oldIdCard.trim())
+                .inSql("BATCH_ID", "SELECT ID FROM YKT_BATCH WHERE STATUS='ISSUED' AND DELETED=0 AND TOWN_ID=" + b.getTownId()));
+        if (details.isEmpty()) return;
+        String bankName = b.getBankId() == null ? null
+                : java.util.Optional.ofNullable(bankMapper.selectById(b.getBankId())).map(YktBank::getBankName).orElse(null);
+        String villageName = b.getVillageId() == null ? null
+                : java.util.Optional.ofNullable(villageMapper.selectById(b.getVillageId())).map(YktVillage::getVillageName).orElse(null);
+        String payeeName = b.getAccountName() != null ? b.getAccountName() : b.getName();   // 与批量填报同源口径
+        LocalDateTime now = LocalDateTime.now();
+        for (YktGrantDetail d : details) {
+            grantDetailMapper.update(null, new UpdateWrapper<YktGrantDetail>()
+                    .eq("ID", d.getId())
+                    .set("HOLDER_NAME", b.getHeadName())
+                    .set("HOLDER_ID_CARD", b.getHeadIdCard())
+                    .set("PAYEE_NAME", payeeName)
+                    .set("PAYEE_ID_CARD", b.getIdCard())
+                    .set("BANK_ACCOUNT", b.getBankAccount())
+                    .set("BANK_NAME", bankName)
+                    .set("VILLAGE_NAME", villageName)
+                    .set("GROUP_NAME", b.getGroupName())
+                    .set("BENEFICIARY_NAME", b.getName())
+                    .set("BENEFICIARY_ID_CARD", b.getIdCard())
+                    .set("PHONE", b.getPhone())
+                    .set("AGE", b.getAge())
+                    .set("RELATIONSHIP", b.getRelation())
+                    .set("UPDATE_TIME", now));
+        }
     }
 
     @Override

@@ -46,7 +46,7 @@
     <el-card shadow="never">
       <div class="list-bar">数据列表</div>
       <!-- :key=列集合签名：模板列异步变化且新列插在中间时，el-table 表头列注册会错乱（体对头不对），整表重建最稳 -->
-      <el-table :key="colsSig" v-loading="loading" :data="rows" border stripe size="small" row-key="id"
+      <el-table ref="rosterTable" :key="colsSig" v-loading="loading" :data="rows" border stripe size="small" row-key="id"
         @selection-change="onSelect" height="56vh">
         <el-table-column type="selection" width="42" reserve-selection />
         <el-table-column type="index" label="序号" width="60" align="center" />
@@ -120,6 +120,12 @@
             <el-option label="2-历史发放数据" value="2" />
           </el-select>
         </div>
+        <div class="sf" v-if="fill.source === '1'"><label>收款人：</label>
+          <el-select v-model="fill.payeeMode" style="width:160px" @change="fillQuery">
+            <el-option label="到户（户主收款）" value="HOUSEHOLD" />
+            <el-option label="到人（本人收款）" value="PERSON" />
+          </el-select>
+        </div>
         <div class="sf"><label>行政村：</label>
           <el-select v-model="fill.villageId" clearable filterable style="width:240px">
             <el-option v-for="v in villages" :key="v.id"
@@ -154,11 +160,12 @@
           <el-table-column label="户主姓名" width="110"><template #default="{ row }"><el-input v-model="row.holderName" size="small" /></template></el-table-column>
           <el-table-column label="户主身份证号" width="185"><template #default="{ row }"><el-input v-model="row.holderIdCard" size="small" maxlength="18" /></template></el-table-column>
         </el-table-column>
+        <!-- 收款人信息按「到户/到人」由补贴对象库带出，禁止手改，防与基础库不一致送审被拦 -->
         <el-table-column label="收款人信息" align="center">
-          <el-table-column label="收款人姓名" width="110"><template #default="{ row }"><el-input v-model="row.payeeName" size="small" /></template></el-table-column>
-          <el-table-column label="收款人身份证号" width="185"><template #default="{ row }"><el-input v-model="row.payeeIdCard" size="small" maxlength="18" /></template></el-table-column>
-          <el-table-column label="银行账号" width="185"><template #default="{ row }"><el-input v-model="row.bankAccount" size="small" /></template></el-table-column>
-          <el-table-column label="开户银行" width="250"><template #default="{ row }"><el-input v-model="row.bankName" size="small" /></template></el-table-column>
+          <el-table-column label="收款人姓名" width="110"><template #default="{ row }"><el-input v-model="row.payeeName" size="small" disabled /></template></el-table-column>
+          <el-table-column label="收款人身份证号" width="185"><template #default="{ row }"><el-input v-model="row.payeeIdCard" size="small" maxlength="18" disabled /></template></el-table-column>
+          <el-table-column label="银行账号" width="185"><template #default="{ row }"><el-input v-model="row.bankAccount" size="small" disabled /></template></el-table-column>
+          <el-table-column label="开户银行" width="250"><template #default="{ row }"><el-input v-model="row.bankName" size="small" disabled /></template></el-table-column>
         </el-table-column>
         <el-table-column label="补贴对象信息" align="center">
           <el-table-column label="村(居)委会" width="150"><template #default="{ row }"><el-input v-model="row.villageName" size="small" /></template></el-table-column>
@@ -240,7 +247,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, watch, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { rosterEditApi, villageApi, orgApi, bankApi } from '../../api/system'
@@ -262,6 +269,7 @@ const searchExpanded = ref(false)
 const q = reactive({ holderName: '', holderIdCard: '', payeeName: '', payeeIdCard: '', bankAccount: '', beneficiaryName: '', beneficiaryIdCard: '' })
 const rows = ref([]); const loading = ref(false)
 const selected = ref([])
+const rosterTable = ref()   // 主表实例：切批次时清 reserve-selection 保留集（防幽灵勾选带失效 id）
 const page = reactive({ pageNum: 1, pageSize: 100, total: 0 })
 // 全国联行号库 1.7 万行：不整表下发。花名册按名称存银行，bankCache 存 名称→行号（本页解析 + 搜索结果）
 const bankCache = reactive({}); const bankLoading = ref(false); const villages = ref([])
@@ -371,7 +379,11 @@ async function resolveRowBanks(list) {
   if (names.length) mergeBankNames(await bankApi.resolve({ names: names.join(',') }))
 }
 
-function onBatchChange() { page.pageNum = 1; loadBatchVillages(); reload() }
+function onBatchChange() {
+  // 切批次=硬上下文切换：清掉上一批次的跨批次保留集，否则残留勾选带失效 id → 后端「明细不存在」
+  clearSel()
+  page.pageNum = 1; loadBatchVillages(); reload()
+}
 async function reload() {
   if (!batchId.value) { rows.value = []; page.total = 0; return }
   loading.value = true
@@ -388,6 +400,10 @@ function filterParams() {
   return o
 }
 function onSelect(s) { selected.value = s }
+// 清 reserve-selection 保留集：删除/停发/批量修改后旧勾选必然失效，
+// el-table 分不清"被删"与"翻页翻走"会把已删行留在保留集里，下次操作带失效 id → 后端「明细不存在」。
+// 只在变更动作后清，翻页的跨页勾选不受影响。
+function clearSel() { rosterTable.value?.clearSelection(); selected.value = [] }
 function needSelected() { if (!selected.value.length) { ElMessage.warning('请先勾选数据'); return false } return true }
 function needBatch() { if (!batchId.value) { ElMessage.warning('请先选择批次'); return false } return true }
 
@@ -424,14 +440,14 @@ async function delSelected() {
   if (!needSelected()) return
   await ElMessageBox.confirm(`确认删除选中的 ${selected.value.length} 条？`, '提示', { type: 'warning' })
   await rosterEditApi.remove(selected.value.map(r => r.id).join(','))
-  ElMessage.success('已删除'); reload()
+  ElMessage.success('已删除'); clearSel(); reload()
 }
 
 // 批量填报（宽表可编辑 + 逐行增删；勾选带金额的行保存，同批次人员不可重复）
 const towns = ref([])
 const fillVisible = ref(false); const filling = ref(false); const fillLoading = ref(false)
 const fillExpanded = ref(false)
-const fill = reactive({ source: '1', villageId: null, beneficiaryName: '', bulkAmount: null })
+const fill = reactive({ source: '1', villageId: null, beneficiaryName: '', bulkAmount: null, payeeMode: 'HOUSEHOLD' })
 const candidates = ref([]); const candSelected = ref([]); const candTable = ref(null)
 // 行唯一键：+/- 增删行与选择保留（reserve-selection）都靠它，别用 index（增删后错位）
 let fillKeySeq = 0
@@ -441,9 +457,12 @@ const blankFillRow = () => ({
   villageName: '', groupName: '', beneficiaryName: '', beneficiaryIdCard: '', phone: '', age: null,
   standard: 0, amount: 0, fillDate: null, remark: ''
 })
+// 候选表无分页，reserve-selection 仅用于保住 +/- 增删行时的勾选；但它也会把旧查询/上次开弹窗的勾选
+// （旧 _k）一直留在保留集里，导致跨查询、跨弹窗累积（"只选1个却出13个"）。开弹窗/每次查询都清一次保留集。
+function clearCandSel() { candTable.value?.clearSelection(); candSelected.value = [] }
 function openFill() {
   if (!needBatch()) return
-  candidates.value = []; candSelected.value = []
+  candidates.value = []; clearCandSel()
   fill.villageId = null; fill.beneficiaryName = ''; fill.bulkAmount = null; fillExpanded.value = false
   fillVisible.value = true
 }
@@ -455,9 +474,12 @@ async function fillQuery() {
       batchId: batchId.value,
       source: fill.source,
       villageId: fill.villageId || undefined,
-      beneficiaryName: fill.beneficiaryName || undefined
+      beneficiaryName: fill.beneficiaryName || undefined,
+      payeeMode: fill.payeeMode
     })
     candidates.value = (list || []).map(r => ({ ...blankFillRow(), ...r, _k: ++fillKeySeq, standard: 0, amount: 0 }))
+    // 换了候选数据：清掉上次查询残留在保留集里的旧勾选，否则会跨查询叠加
+    await nextTick(); clearCandSel()
   } finally { fillLoading.value = false }
 }
 function onCandSelect(s) { candSelected.value = s }
@@ -491,7 +513,7 @@ function openBatchEdit() {
 }
 async function saveBatch() {
   batchSaving.value = true
-  try { await rosterEditApi.batchSave(batchRows.value); ElMessage.success('已保存'); batchVisible.value = false; reload() }
+  try { await rosterEditApi.batchSave(batchRows.value); ElMessage.success('已保存'); batchVisible.value = false; clearSel(); reload() }
   finally { batchSaving.value = false }
 }
 
@@ -514,7 +536,7 @@ async function doStop() {
     { confirmButtonText: '确定', cancelButtonText: '取消', inputType: 'textarea',
       inputValidator: v => (v && v.trim()) ? true : '停发原因不能为空' })
   const res = await rosterEditApi.stopDetails(selected.value.map(r => String(r.id)), reason.trim())
-  ElMessage.success(`已停发 ${res?.count ?? selected.value.length} 人`); reload()
+  ElMessage.success(`已停发 ${res?.count ?? selected.value.length} 人`); clearSel(); reload()
 }
 async function doDeleteBatch() {
   if (!needBatch()) return

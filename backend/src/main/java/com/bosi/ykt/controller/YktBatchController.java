@@ -8,6 +8,8 @@ import com.bosi.ykt.common.R;
 import com.bosi.ykt.entity.YktBatch;
 import com.bosi.ykt.mapper.YktBatchMapper;
 import com.bosi.ykt.mapper.YktPaymentApplyMapper;
+import com.bosi.ykt.mapper.YktGrantDetailMapper;
+import com.bosi.ykt.entity.YktGrantDetail;
 import com.bosi.ykt.security.UserContext;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.bosi.ykt.entity.YktPaymentApply;
@@ -41,6 +43,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class YktBatchController extends BaseCrudController<YktBatchMapper, YktBatch> {
     private final YktBatchMapper mapper;
     private final YktPaymentApplyMapper paymentApplyMapper;
+    private final YktGrantDetailMapper grantDetailMapper;
     private final YktAuditLogMapper auditLogMapper;
     private final SysUserMapper userMapper;
     private final SysOrgMapper orgMapper;
@@ -255,6 +258,11 @@ public class YktBatchController extends BaseCrudController<YktBatchMapper, YktBa
         YktBatch b = mapper.selectById(id);
         if (b != null && b.getBatchName() != null && b.getBatchName().startsWith("更正发放"))
             throw new BizException("更正发放批次由系统重构生成，不可取消下达");
+        // 乡镇一旦已填报花名册，取消下达会把在填明细甩成孤儿；收回须走审核退回，不能静默撤回。
+        Long filled = grantDetailMapper.selectCount(
+                new LambdaQueryWrapper<YktGrantDetail>().eq(YktGrantDetail::getBatchId, id));
+        if (filled != null && filled > 0)
+            throw new BizException("乡镇已填报花名册数据，不可取消下达；如需收回请通过审核退回");
         return transit(id, "ISSUED", "NEW", "仅已下达批次可取消下达", "未下达");
     }
 
