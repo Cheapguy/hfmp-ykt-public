@@ -29,7 +29,19 @@ public class YktBatch extends BaseEntity {
     /** 当前待审岗：TOWN_SUBMIT 乡镇录入 / TOWN_REVIEW 乡镇复核岗 / TOWN_AUDIT 乡镇审核
      *  / DEPT_OP 部门经办岗初审 / DEPT_REVIEW 部门复核岗 / DONE 批次发送(结束) */
     private String auditStage;
-    /** 状态列显示文本（待乡镇审核 / 乡镇退回 / 部门审核退回 / 已终审 …） */
+    /**
+     * 退回来源岗（退回时批次所停的审核岗）。乡镇经办改完再送审时直接回该岗续审，
+     * 不重跑 乡镇审核→部门经办→部门领导 全链；null=从未被退回，送审按原口径进 TOWN_AUDIT。
+     * 刻意不在送审时清空：取消送审后再次送审仍应回同一岗，行为要一致。
+     */
+    private String rejectStage;
+    /**
+     * 是否更正发放批次（1=是，由「更正发放」重构生成）。
+     * 人员从源批次固定复制而来，禁止新增/批量填报/导入/删除批次——放开会破坏与源批次的对应关系。
+     * 不再用 BATCH_NAME 前缀判定：批次名在「批次维护」页可随意改，一改前缀这些限制就全失效。
+     */
+    private Integer isCorrection;
+    /** 状态列显示文本（待乡镇审核 / 乡镇审核退回 / 部门审核退回 / 已终审 …） */
     private String lastResult;
     /** 发放时间 */
     private java.time.LocalDateTime grantTime;

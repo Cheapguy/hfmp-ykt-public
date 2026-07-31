@@ -64,7 +64,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Download, RefreshRight } from '@element-plus/icons-vue'
@@ -77,14 +77,31 @@ const projects = ref([]); const towns = ref([]); const batches = ref([]); const 
 const query = reactive({ projectId: null, batchCode: '', townId: null })
 const rows = ref([]); const loading = ref(false); const selected = ref([])
 
-onMounted(async () => {
-  projects.value = (await projectApi.list({ included: 1, tab: 'all' })) || []
-  towns.value = ((await orgApi.tree()) || []).filter(o => o.orgType === 'TOWN')
-  // 工作台待办点入：默认选中对应项目/批次（Long 已按字符串序列化，直接用，勿 Number 丢精度）
+// 工作台待办点入：默认选中对应项目/批次（Long 已按字符串序列化，直接用，勿 Number 丢精度）
+async function applyRouteQuery() {
   if (route.query.projectId) query.projectId = String(route.query.projectId)
   if (route.query.batchCode) query.batchCode = String(route.query.batchCode)
   if (query.projectId) await loadBatches('')   // 预载批次下拉，令批次能显示名称
   reload()
+}
+
+onMounted(async () => {
+  projects.value = (await projectApi.list({ included: 1, tab: 'all' })) || []
+  towns.value = ((await orgApi.tree()) || []).filter(o => o.orgType === 'TOWN')
+  await applyRouteQuery()
+})
+
+// 本页标签被 keep-alive 缓存且 :key 只认 path 不含 query：标签不关时再点另一条待办，
+// 组件不会重新挂载，只 onMounted 回填的话筛选框仍是上一条、静默无反应。
+// 两个必须条件（缺一个就串页/串筛选，同 RosterEdit 的 ownPath 范式）：
+// ① 守 ownPath —— keep-alive 不暂停 watcher，route 又是全应用共享，不守就会被别的页面导航触发：
+//    /dept/audit/review 也读 projectId+batchCode 这两个键，点「待审核」会把本页筛选改成审核批次。
+// ② 监听具体键的值而非 route.query 对象 —— 对象每次导航都是新引用，点回本标签时 layout 会 push
+//    冻结的原 fullPath，监听对象会重跑一遍回填、把用户手改的筛选盖回去。
+const ownPath = route.path
+watch([() => route.query.projectId, () => route.query.batchCode], () => {
+  if (route.path !== ownPath) return
+  applyRouteQuery()
 })
 
 async function reload() {

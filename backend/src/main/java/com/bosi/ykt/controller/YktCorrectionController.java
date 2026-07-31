@@ -130,6 +130,7 @@ public class YktCorrectionController {
             nb.setTownId(src.getTownId());
             nb.setBatchCode(genBatchCode(seq++));
             nb.setBatchName("更正发放（第" + round + "次）--" + srcName);
+            nb.setIsCorrection(1);           // 显式标记：人员固定复制，禁新增/填报/导入/删批次（不靠批次名前缀）
             nb.setFundTitle(src.getFundTitle());
             nb.setStatus("ISSUED");          // 已下达 → 乡镇可在「待编制花名册」看到并填报
             nb.setAuditStage("DRAFT");

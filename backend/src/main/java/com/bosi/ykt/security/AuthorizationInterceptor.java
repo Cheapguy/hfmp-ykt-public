@@ -57,8 +57,9 @@ public class AuthorizationInterceptor implements HandlerInterceptor {
             Map.entry("/setup/bank",        new Rule(201, true)),
             Map.entry("/setup/village",     new Rule(202, true)),
             Map.entry("/setup/beneficiary", new Rule(203, true)),
-            // 引用请求审批流：GET(待审列表) 开放、写(提交/确认/拒绝) 须补贴对象维护菜单 203；数据面由 DataScope 收窄到本辖区
-            Map.entry("/setup/refer-request", new Rule(203, true)),
+            // 引用请求审批流：读写都须补贴对象维护菜单 203（不能像 /sys/org 那样 writeOnly——
+            // 它不是各页共用的字典，GET 返回身份证号，只被补贴对象维护页和乡镇工作台调用，开放读等于白给一个身份证读取口）
+            Map.entry("/setup/refer-request", new Rule(203, false)),
             // ===== 发放数据审核 =====
             Map.entry("/dept/audit",        new Rule(601, true)),
             // ===== 主管部门 =====

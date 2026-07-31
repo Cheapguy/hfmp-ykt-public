@@ -157,12 +157,13 @@ public class YktBeneficiaryController extends BaseCrudController<YktBeneficiaryM
     public R<?> create(@org.springframework.web.bind.annotation.RequestBody YktBeneficiary e) {
         fillTownFromVillage(e);          // 前端表单只选村委会，按村委会推乡镇归属
         assertTownScope(e.getTownId());
-        // 引用建档（referred=1，人户迁移复制建档）放行同证复制，普通新增全库查重
-        if (!Integer.valueOf(1).equals(e.getReferred())) {
-            YktBeneficiary d = findByIdCard(e.getIdCard());
-            if (d != null) throw new BizException("家庭成员姓名：" + d.getName() + "，身份证号码：" + d.getIdCard()
-                    + " 在系统中(" + ownerLabel(d.getTownId()) + ")已存在！");
-        }
+        // REFERRED 是系统管理标记，不接受客户端赋值：本接口一律按普通新增(0)处理并做全库查重。
+        // 引用建档(referred=1，人户迁移复制建档)只能由引用请求审批流的 YktReferRequestController#createCopy 写入——
+        // 否则直连本接口传 referred=1 就能跳过查重把外县人落到自己乡镇，两方审批形同虚设。
+        e.setReferred(0);
+        YktBeneficiary d = findByIdCard(e.getIdCard());
+        if (d != null) throw new BizException("家庭成员姓名：" + d.getName() + "，身份证号码：" + d.getIdCard()
+                + " 在系统中(" + ownerLabel(d.getTownId()) + ")已存在！");
         return super.create(e);
     }
 
@@ -171,6 +172,9 @@ public class YktBeneficiaryController extends BaseCrudController<YktBeneficiaryM
     public R<?> update(@org.springframework.web.bind.annotation.RequestBody YktBeneficiary e) {
         if (e.getId() == null) throw new com.bosi.ykt.common.BizException("缺少 id");
         YktBeneficiary old = assertExisting(e.getId());
+        // 同 create：REFERRED 不可由客户端改动（置 null → MP updateById 跳过该列，保留库中原值）。
+        // 双向都要挡：0→1 能凭空造引用档绕审批流；1→0 能把引用副本洗成「原始建档」，原乡镇的删除保护就失效了。
+        e.setReferred(null);
         fillTownFromVillage(e);          // 改了村委会则同步回填新乡镇归属（未改村委会 villageId 为空不动 townId）
         if (e.getTownId() != null) assertTownScope(e.getTownId());   // 改乡镇归属也须在本县内
         // 仅当把身份证号改成了别的号时查重（不改号的常规编辑不受已有引用副本影响）

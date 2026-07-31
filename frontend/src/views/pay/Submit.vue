@@ -117,17 +117,34 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Stamp, Delete, CreditCard } from '@element-plus/icons-vue'
 import { paymentApi } from '../../api/system'
 
 const LABEL = { PENDING_SUBMIT: '待送审', SUBMITTED: '已送审', PAID: '已支付' }
 
+const route = useRoute()
 const tab = ref('PENDING_SUBMIT')
 const rows = ref([]); const loading = ref(false); const selected = ref([])
 
-onMounted(reload)
+// 工作台待办点入：待签章送审→待送审 tab，待标记发放结果→已送审 tab。
+// 本页标签被 keep-alive 缓存且 :key 只认 path 不含 query，标签留着再点另一条待办不会重挂组件，故补 watch。
+const TABS = ['PENDING_SUBMIT', 'SUBMITTED']   // 只有这两个 el-tab-pane；LABEL 里的 PAID 不是可切换 tab
+function applyRouteQuery() {
+  const t = String(route.query.tab || '')
+  if (TABS.includes(t)) tab.value = t
+  reload()
+}
+onMounted(applyRouteQuery)
+// 守 ownPath + 监听具体键：keep-alive 不暂停 watcher、route 全应用共享，
+// 不守会被别页导航触发；监听 route.query 对象则会在点回本标签(push 冻结 fullPath)时把用户手切的 tab 拽回去
+const ownPath = route.path
+watch(() => route.query.tab, () => {
+  if (route.path !== ownPath) return
+  applyRouteQuery()
+})
 
 function money(v) { return v == null ? '' : Number(v).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }
 

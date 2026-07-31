@@ -29,10 +29,17 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * 引用请求审批流。乡镇 A 引用乡镇 B 名下补贴对象：
+ * 引用请求审批流（两方乡镇闭环，不走「乡镇审核岗→主管经办→主管审核」多级链）。乡镇 A 引用乡镇 B 名下补贴对象：
  * 1) A 填好落地村组 + 留言(必填) → 提交 PENDING 请求；
  * 2) B（被引用乡镇）在工作台看到待审引用，核对人员 + 留言；
- * 3) B 确认 → 按载荷复制建档(referred=1)，请求置 APPROVED；B 驳回 → REJECTED。
+ * 3) B 确认 → APPROVED（**不建档**）；B 驳回 → REJECTED；
+ * 4) A 收到「已通过·待纳入」通知，点「纳入补贴对象库」→ 按载荷复制建档(referred=1) → INCLUDED。
+ *
+ * <p>状态机：PENDING → APPROVED → INCLUDING（原子抢占中间态）→ INCLUDED；
+ * PENDING → REJECTED；APPROVED → VOIDED（纳入时发现原始档已删/已迁出，自动作废可重新发起）。
+ *
+ * <p>判权口径：提交/纳入须**引用方乡镇**本机构账号，确认/驳回须**被引用乡镇**本机构账号
+ * （见 {@link DataScopeResolver#assertOwnTown}）。县级账号纳入后能正常看见、正常发补贴，但不代乡镇行使审批。
  */
 @RestController
 @RequestMapping("/setup/refer-request")
@@ -66,7 +73,7 @@ public class YktReferRequestController {
         YktVillage v = villageMapper.selectById(p.getVillageId());
         if (v == null) throw new BizException("村(居)委会不存在");
         Long targetTownId = v.getTownId();
-        assertInScope(targetTownId);   // 引用方只能把人落到本人辖区
+        dataScope.assertOwnTown(targetTownId, "引用方乡镇");   // 只能把人落到本乡镇，且须乡镇账号本人发起
 
         // 定位原始建档（信任源）：优先 sourceId，回退按身份证。身份/银行字段全部取自它。
         YktBeneficiary src = null;
@@ -134,10 +141,12 @@ public class YktReferRequestController {
         return R.ok(listByStatus("PENDING"));
     }
 
-    /** 被引用乡镇待审计数（工作台角标）。 */
+    /** 被引用乡镇待审计数（工作台角标）。走 selectCount，不复用 listByStatus——后者会拉全量行 + 逐行查村名。 */
     @GetMapping("/pending-count")
     public R<Integer> pendingCount() {
-        return R.ok(listByStatus("PENDING").size());
+        QueryWrapper<YktReferRequest> w = sourceScopeWrapper("PENDING");
+        Long n = w == null ? null : mapper.selectCount(w);
+        return R.ok(n == null ? 0 : n.intValue());
     }
 
     // ==================== 我发起的引用（引用方看状态 + 待纳入通知）====================
@@ -193,20 +202,30 @@ public class YktReferRequestController {
         if ("PENDING".equals(s)) return "待审核";
         if ("APPROVED".equals(s)) return "已通过·待纳入";
         if ("REJECTED".equals(s)) return "已拒绝";
+        if ("INCLUDING".equals(s)) return "纳入中";   // 事务中间态，仅纳入被中断时才可见
         if ("INCLUDED".equals(s)) return "已纳入";
+        if ("VOIDED".equals(s)) return "已作废";
         return s;
     }
 
-    private List<Map<String, Object>> listByStatus(String status) {
+    /**
+     * 被引用乡镇视角的查询条件（按 SOURCE_TOWN_ID 收窄）。
+     * 返回 null = 范围空集，调用方直接给零结果。
+     */
+    private QueryWrapper<YktReferRequest> sourceScopeWrapper(String status) {
         Set<Long> towns = dataScope.allowedTowns();   // null=管理员看全部
+        if (towns != null && towns.isEmpty()) return null;
         QueryWrapper<YktReferRequest> w = new QueryWrapper<>();
         Long tid = UserContext.currentTenantId();
         if (tid != null) w.eq("TENANT_ID", tid);
         w.eq("STATUS", status);
-        if (towns != null) {
-            if (towns.isEmpty()) return new ArrayList<>();
-            w.in("SOURCE_TOWN_ID", towns);
-        }
+        if (towns != null) w.in("SOURCE_TOWN_ID", towns);
+        return w;
+    }
+
+    private List<Map<String, Object>> listByStatus(String status) {
+        QueryWrapper<YktReferRequest> w = sourceScopeWrapper(status);
+        if (w == null) return new ArrayList<>();
         w.orderByDesc("APPLY_TIME");
         List<Map<String, Object>> out = new ArrayList<>();
         for (YktReferRequest r : mapper.selectList(w)) {
@@ -239,6 +258,8 @@ public class YktReferRequestController {
                 .set("STATUS", "APPROVED")
                 .set("AUDIT_USER_ID", UserContext.currentUserId())
                 .set("AUDIT_TIME", LocalDateTime.now())
+                .set("UPDATE_BY", UserContext.currentUserId())   // UpdateWrapper 不走 MetaHandler，审计字段手工补
+                .set("UPDATE_TIME", LocalDateTime.now())
                 .eq("ID", id).eq("STATUS", "PENDING"));
         if (ok == 0) throw new BizException("该引用请求已处理");
         return R.ok();
@@ -251,7 +272,20 @@ public class YktReferRequestController {
         YktReferRequest r = id == null ? null : mapper.selectById(id);
         if (r == null) throw new BizException("引用请求不存在");
         if (!"APPROVED".equals(r.getStatus())) throw new BizException("该请求未通过审核或已纳入");
-        assertInScope(r.getTargetTownId());   // 只有引用方乡镇能纳入
+        dataScope.assertOwnTown(r.getTargetTownId(), "引用方乡镇");   // 纳入是引用方的动作，县级不代办
+
+        // 复核原始档现状：确认与纳入之间被引用乡镇可能已把人删掉/迁走（此时删除保护拦不住——副本还没建），
+        // 再按旧快照落地就留下一条无源引用档、SOURCE_ID 成悬空外键。作废本次请求，让引用方重新发起。
+        YktBeneficiary src = r.getSourceId() == null ? null : beneficiaryMapper.selectById(r.getSourceId());
+        if (src == null || !java.util.Objects.equals(src.getTownId(), r.getSourceTownId()))
+            return voidRequest(id, "原始建档已删除或已迁出被引用乡镇，本次引用作废，请重新发起");
+
+        // 复核本乡镇是否已有该证引用副本（并发双提交 / 期间人工建过）：不查就会给同一人建两份档
+        Long existCopy = beneficiaryMapper.selectCount(new QueryWrapper<YktBeneficiary>()
+                .eq("ID_CARD", r.getIdCard()).eq("TOWN_ID", r.getTargetTownId()).eq("REFERRED", 1));
+        if (existCopy != null && existCopy > 0)
+            return voidRequest(id, "该对象已引用建档在本乡镇，无需重复纳入");
+
         // 原子抢占 APPROVED→INCLUDING：并发双击/重试只有一个抢到，防同一人建两份档
         int locked = mapper.update(null, new UpdateWrapper<YktReferRequest>()
                 .set("STATUS", "INCLUDING").eq("ID", id).eq("STATUS", "APPROVED"));
@@ -259,8 +293,26 @@ public class YktReferRequestController {
         Long copyId = createCopy(r);
         mapper.update(null, new UpdateWrapper<YktReferRequest>()
                 .set("STATUS", "INCLUDED").set("RESULT_BENEFICIARY_ID", copyId)
+                .set("UPDATE_BY", UserContext.currentUserId())
+                .set("UPDATE_TIME", LocalDateTime.now())
                 .eq("ID", id));
         return R.ok();
+    }
+
+    /**
+     * 纳入前置校验不通过：置 VOIDED（附因由）并回错误信息。
+     *
+     * <p>刻意用 R.fail 而不是抛 BizException——抛出会把这条状态更新一起回滚，
+     * 请求就卡在 APPROVED：既纳入不了，又因去重②（PENDING/APPROVED 在途拦重复）无法重新发起，成死局。
+     * VOIDED 不在去重②的在途集合里，引用方可立即重提。
+     */
+    private R<?> voidRequest(Long id, String reason) {
+        LocalDateTime now = LocalDateTime.now();
+        mapper.update(null, new UpdateWrapper<YktReferRequest>()
+                .set("STATUS", "VOIDED").set("AUDIT_REMARK", reason).set("AUDIT_TIME", now)
+                .set("UPDATE_BY", UserContext.currentUserId()).set("UPDATE_TIME", now)
+                .eq("ID", id).eq("STATUS", "APPROVED"));
+        return R.fail(reason);
     }
 
     /** 按 payloadJson 复制建档（referred=1，落引用方乡镇）。 */
@@ -289,24 +341,22 @@ public class YktReferRequestController {
                 .set("AUDIT_USER_ID", UserContext.currentUserId())
                 .set("AUDIT_TIME", LocalDateTime.now())
                 .set("AUDIT_REMARK", body == null ? null : java.util.Objects.toString(body.get("remark"), null))
+                .set("UPDATE_BY", UserContext.currentUserId())
+                .set("UPDATE_TIME", LocalDateTime.now())
                 .eq("ID", id).eq("STATUS", "PENDING"));
         if (ok == 0) throw new BizException("该引用请求已处理");
         return R.ok();
     }
 
     // ==================== helpers ====================
-    /** 取 PENDING 请求 + 审批方越权兜底（仅被引用乡镇 / 管理员可操作）。 */
+    /** 取 PENDING 请求 + 审批方身份兜底（仅被引用乡镇本机构账号 / 管理员可操作）。 */
     private YktReferRequest mustPending(Long id) {
         YktReferRequest r = id == null ? null : mapper.selectById(id);
         if (r == null) throw new BizException("引用请求不存在");
         if (!"PENDING".equals(r.getStatus())) throw new BizException("该引用请求已处理");
-        assertInScope(r.getSourceTownId());   // 只有被引用乡镇（拥有原始建档）能审批
+        // 判乡镇身份而非数据范围：否则县级账号(范围含全县)能既替 A 发起又替 B 审批，两方制退化成一人走完
+        dataScope.assertOwnTown(r.getSourceTownId(), "被引用乡镇");
         return r;
-    }
-
-    /** 目标乡镇须在本人辖区：委托 DataScopeResolver 单一真源。 */
-    private void assertInScope(Long townId) {
-        dataScope.assertTown(townId, "该引用请求");
     }
 
     private String realName(Long uid) {

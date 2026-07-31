@@ -184,12 +184,19 @@ public class YktBatchController extends BaseCrudController<YktBatchMapper, YktBa
         if (!"NEW".equals(old.getStatus()) && !"ISSUED".equals(old.getStatus()))
             throw new BizException("批次已进入审核/支付流程，基本信息不可修改");
         if (b.getTownId() != null) assertTownScope(b.getTownId());   // 改下达单位也须在本县内
-        b.setStatus(null); b.setAuditStage(null); b.setLastResult(null);
-        b.setPlanCount(null); b.setPlanAmount(null);
-        b.setActualCount(null); b.setActualAmount(null);
-        b.setRefundAmount(null); b.setReturnAmount(null); b.setStopAmount(null);
-        b.setGrantTime(null);
-        mapper.updateById(b);
+        // 白名单：新建干净实体只拷「基本信息」字段，其余(状态机/资金/审核跳级/更正标记/批次编码)一律不采纳。
+        // 原先是逐个 setNull 的黑名单——每加一个状态机字段就得记着清一次，加 REJECT_STAGE/IS_CORRECTION 时就漏了：
+        // 直连 PUT {"id":x,"isCorrection":0} 能洗掉更正批次全部写守卫，{"rejectStage":"DEPT_REVIEW"} 能让批次
+        // 送审直达部门领导岗、跳过乡镇审核与部门经办两级。白名单让以后新增字段默认安全。
+        YktBatch u = new YktBatch();
+        u.setId(b.getId());
+        u.setProjectId(b.getProjectId());
+        u.setBatchName(b.getBatchName());
+        u.setFundTitle(b.getFundTitle());
+        u.setDeadline(b.getDeadline());
+        u.setRemark(b.getRemark());
+        u.setTownId(b.getTownId());
+        mapper.updateById(u);
         return R.ok();
     }
 
@@ -249,14 +256,24 @@ public class YktBatchController extends BaseCrudController<YktBatchMapper, YktBa
     /** 批次下达。手册 §十-4 */
     @PostMapping("/{id}/issue")
     public R<?> issue(@PathVariable Long id) {
-        return transit(id, "NEW", "ISSUED", "仅未下达批次可下达", "已下达");
+        assertBatchScope(id);
+        // 下达=开启新一轮发放，顺手清掉上一轮的退回历史：否则「送审→被部门领导退回→删空明细→取消下达
+        // →重新下达→填一批全新的人」时，残留的 REJECT_STAGE 会让送审直达部门领导岗，
+        // 乡镇审核与部门经办两级从没见过这份清册。
+        int r = mapper.update(null, new UpdateWrapper<YktBatch>()
+                .eq("ID", id).eq("STATUS", "NEW")
+                .set("STATUS", "ISSUED").set("LAST_RESULT", "已下达").set("REJECT_STAGE", null));
+        if (r == 0) throw new BizException("仅未下达批次可下达");
+        return R.ok();
     }
 
     /** 取消批次下达。手册 §十-5 */
     @PostMapping("/{id}/cancel-issue")
     public R<?> cancelIssue(@PathVariable Long id) {
         YktBatch b = mapper.selectById(id);
-        if (b != null && b.getBatchName() != null && b.getBatchName().startsWith("更正发放"))
+        // 判 IS_CORRECTION 为主、批次名前缀兜底（与 deleteBatch 同口径；批次名可改，不能只靠它）
+        if (b != null && (Integer.valueOf(1).equals(b.getIsCorrection())
+                || (b.getBatchName() != null && b.getBatchName().startsWith("更正发放"))))
             throw new BizException("更正发放批次由系统重构生成，不可取消下达");
         // 乡镇一旦已填报花名册，取消下达会把在填明细甩成孤儿；收回须走审核退回，不能静默撤回。
         Long filled = grantDetailMapper.selectCount(

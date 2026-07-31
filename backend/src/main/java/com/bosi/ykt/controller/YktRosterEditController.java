@@ -113,10 +113,11 @@ public class YktRosterEditController {
             if (!projectCode.matches("\\d{1,12}")) throw new BizException("项目编码不合法");
             w.inSql("PROJECT_ID", "SELECT ID FROM YKT_PROJECT WHERE PROJECT_CODE='" + projectCode + "'");
         }
-        // 已下达(可编制) + 刚送审待乡镇审核(SUBMITTED@TOWN_AUDIT，供锁定展示/取消送审)；
-        // 过了乡镇审核的批次不再归编制岗，故不含更后阶段。
+        // 已下达(可编制) + 刚送审还没人审(SUBMITTED 且 LAST_RESULT 属送审态，供锁定展示/取消送审)；
+        // 判据不用 AUDIT_STAGE='TOWN_AUDIT'——「原岗续审」后可能直接停在部门岗，同属没人动过；
+        // 一旦被审过 LAST_RESULT 变「乡镇已审」等，批次即离开编制岗视野。
         w.and(x -> x.eq("STATUS", "ISSUED")
-                .or(y -> y.eq("STATUS", "SUBMITTED").eq("AUDIT_STAGE", "TOWN_AUDIT")));
+                .or(y -> y.eq("STATUS", "SUBMITTED").in("LAST_RESULT", SUBMIT_TEXTS)));
         w.orderByAsc("ID");
         dataScope.applyTown(w, "TOWN_ID");   // 县域隔离：乡镇只见本乡镇待编制批次
         List<YktBatch> batches = batchMapper.selectList(w);
@@ -132,11 +133,34 @@ public class YktRosterEditController {
             m.put("batchName", b.getBatchName());
             m.put("projectName", projName.get(b.getProjectId()));
             m.put("status", b.getStatus());   // 前端据此锁定编辑按钮（SUBMITTED=已送审）
-            m.put("tag", "SUBMITTED".equals(b.getStatus()) ? "已送审"
-                    : (b.getRemark() == null || b.getRemark().isBlank() ? "新增" : b.getRemark()));
+            m.put("tag", pendingTag(b));
+            m.put("isCorrection", b.getIsCorrection());   // 前端据此置灰 新增/批量填报/导入/删除批次
+            m.put("rejectStage", b.getRejectStage());
+            // 退回过的清册：送审后直接回该岗，前端提示用
+            m.put("resumeStageLabel", b.getRejectStage() == null ? null
+                    : STAGE_LABEL.get(b.getRejectStage()));
             out.add(m);
         }
         return R.ok(out);
+    }
+
+    /**
+     * 待编制清册的标签（对齐生产首页：【部门审核退回】/【新增】）。
+     * 退回态优先——原来只看 REMARK，退回的清册在待办里会显示成「新增」，看不出是被谁退回的。
+     */
+    private static String pendingTag(YktBatch b) {
+        if ("SUBMITTED".equals(b.getStatus())) return "已送审";
+        // 退回态以 REJECT_STAGE 为真源，而不是只看 LAST_RESULT：取消送审会把 LAST_RESULT 改成「待编制」，
+        // 只认 LAST_RESULT 的话标签会掉回「新增」，乡镇经办会误以为是一份新批次。
+        if (b.getRejectStage() != null) return rejectLabel(b.getRejectStage());
+        String lr = b.getLastResult();
+        if (lr != null && lr.contains("退回")) return lr;      // 历史数据兜底（REJECT_STAGE 列上线前的退回批次）
+        return b.getRemark() == null || b.getRemark().isBlank() ? "新增" : b.getRemark();
+    }
+
+    /** 退回来源岗 -> 退回标签（对齐生产：部门审核退回 / 乡镇审核退回）。 */
+    private static String rejectLabel(String rejectStage) {
+        return rejectStage != null && rejectStage.startsWith("DEPT") ? "部门审核退回" : "乡镇审核退回";
     }
 
     /** 编制界面表头：批次基本信息 */
@@ -152,6 +176,8 @@ public class YktRosterEditController {
             m.put("status", b.getStatus());
             m.put("remark", b.getRemark());
             m.put("townId", b.getTownId());
+            m.put("isCorrection", b.getIsCorrection());   // 同 pending：前端按钮禁用判据
+            m.put("rejectStage", b.getRejectStage());
         }
         return R.ok(m);
     }
@@ -185,10 +211,17 @@ public class YktRosterEditController {
         return R.ok(grantMapper.selectPage(new Page<>(pageNum, pageSize), w));
     }
 
-    /** 批量填报-候选数据：数据来源 1=补贴对象库 2=历史发放数据。
-     *  batchId 传入时，已在本批次的享受人身份证不再作为候选（同批次人员不可重复）。 */
+    /**
+     * 批量填报-候选数据：数据来源 1=补贴对象库 2=历史发放数据。
+     * batchId 传入时，已在本批次的享受人身份证不再作为候选（同批次人员不可重复）。
+     *
+     * <p>返回 {@code {rows, skippedHouseholds, skippedPeople}}：到户模式下户主本人无档案的整户不作为候选，
+     * 数量回给前端提示「请先补录户主本人档案」——不能默默回落成成员本人收款，那等于把到户的钱打给子女/孙辈，
+     * 且送审校验会因 payeeIdCard==享受人本人 判定为「本人收款」而放行，绕过 validateForSubmit 里
+     * 「收款人（户主）在补贴对象基础库缺失…请先维护户主档案」这道关卡。
+     */
     @GetMapping("/fill-candidates")
-    public R<List<Map<String, Object>>> fillCandidates(@RequestParam(defaultValue = "1") String source,
+    public R<Map<String, Object>> fillCandidates(@RequestParam(defaultValue = "1") String source,
                                                         @RequestParam(required = false) Long batchId,
                                                         @RequestParam(required = false) Long villageId,
                                                         @RequestParam(required = false) String beneficiaryName,
@@ -200,6 +233,8 @@ public class YktRosterEditController {
         Set<String> existed = existingIdCards(batchId);
 
         List<Map<String, Object>> out = new ArrayList<>();
+        Set<String> skippedHeads = new LinkedHashSet<>();   // 到户但户主无档案被整户跳过的户（按户主身份证去重）
+        int skippedPeople = 0;
         if ("2".equals(source)) {
             // 历史发放数据：从已发放花名册去重取人
             QueryWrapper<YktGrantDetail> w = scope();
@@ -260,11 +295,20 @@ public class YktRosterEditController {
             }
             for (YktBeneficiary p : people) {
                 if (p.getIdCard() != null && existed.contains(p.getIdCard().trim())) continue;   // 已在本批次，跳过
-                // 收款人账户来源：到户取户主档案（缺失则回落成员本人），到人取成员本人
+                // 收款人账户来源：到户取户主档案，到人取成员本人
                 YktBeneficiary payer = p;
-                if (toHousehold && p.getHeadIdCard() != null) {
-                    YktBeneficiary h = headMap.get(p.getHeadIdCard().trim());
-                    if (h != null) payer = h;
+                if (toHousehold) {
+                    String hid = p.getHeadIdCard() == null ? "" : p.getHeadIdCard().trim();
+                    YktBeneficiary h = hid.isEmpty() ? null : headMap.get(hid);
+                    // 到户的钱必须进户主账户：户主本人无档案(或非正常状态)则整户不作为候选，交前端提示先补录户主。
+                    // 绝不回落成成员本人——库里 43% 的户没录户主本人，回落会静默把钱打到子女/孙辈账户上。
+                    if (h == null) {
+                        // 户主身份证也为空时用本人主键兜底做键：否则多人共用 "(缺户主)null" 一个键，户数少算
+                        skippedHeads.add(hid.isEmpty() ? ("(缺户主)" + p.getId()) : hid);
+                        skippedPeople++;
+                        continue;
+                    }
+                    payer = h;
                 }
                 Map<String, Object> m = new LinkedHashMap<>();
                 m.put("holderName", p.getHeadName());
@@ -283,7 +327,11 @@ public class YktRosterEditController {
                 out.add(m);
             }
         }
-        return R.ok(out);
+        Map<String, Object> res = new LinkedHashMap<>();
+        res.put("rows", out);
+        res.put("skippedHouseholds", skippedHeads.size());
+        res.put("skippedPeople", skippedPeople);
+        return R.ok(res);
     }
 
     /** 批量填报-保存：勾选的候选+补贴金额 写入批次 */
@@ -293,6 +341,7 @@ public class YktRosterEditController {
         Long batchId = Long.valueOf(String.valueOf(body.get("batchId")));
         assertScope(batchId);
         requireEditable(batchId);
+        assertNotCorrection(batchId, "批量填报");
         List<Map<String, Object>> rows = (List<Map<String, Object>>) body.get("rows");
         if (rows == null || rows.isEmpty()) return R.ok(0);
         YktBatch batch = batchMapper.selectById(batchId);
@@ -347,13 +396,31 @@ public class YktRosterEditController {
             throw new BizException(label + "：" + v.trim() + " ，位数(" + v.trim().length() + ")错误，请核对！");
     }
 
-    /** 新增/修改一条 */
+    /**
+     * 更正发放批次守卫：人员从源批次固定复制而来，禁止再往里加人（新增/批量填报/导入）或删掉整批。
+     * 前端按钮置灰只防误触，直连接口照样能改，故写入口逐个断言。
+     * 判 IS_CORRECTION 而非批次名前缀——批次名在「批次维护」页可改，一改前缀限制就失效。
+     */
+    private void assertNotCorrection(Long batchId, String action) {
+        YktBatch b = batchId == null ? null : batchMapper.selectById(batchId);
+        if (b != null && Integer.valueOf(1).equals(b.getIsCorrection()))
+            throw new BizException("更正发放批次由系统按源批次重构生成，人员固定，不可" + action);
+    }
+
+    /** 明细级的更正批次守卫（只握 detailId 的接口用，如删除明细）。 */
+    private void assertDetailNotCorrection(Long detailId) {
+        YktGrantDetail d = detailId == null ? null : grantMapper.selectById(detailId);
+        if (d != null) assertNotCorrection(d.getBatchId(), "删除人员（如需不发放请用「停发」）");
+    }
+
+    /** 新增/修改一条（更正批次只允许修改，不允许新增） */
     @PostMapping
     public R<Void> save(@RequestBody YktGrantDetail d) {
         checkIdCards(d);
         if (d.getId() == null) {
             assertScope(d.getBatchId());
             requireEditable(d.getBatchId());
+            assertNotCorrection(d.getBatchId(), "新增人员");
             d.setSortNo(nextSortNo(d.getBatchId()));
             YktBatch b = batchMapper.selectById(d.getBatchId());
             if (b != null) d.setBatchCode(b.getBatchCode());
@@ -362,6 +429,7 @@ public class YktRosterEditController {
         } else {
             assertDetailScope(d.getId());
             requireDetailEditable(d.getId());
+            sanitizeDetailUpdate(d);
             grantMapper.updateById(d);
         }
         return R.ok();
@@ -371,16 +439,54 @@ public class YktRosterEditController {
     @PostMapping("/batch-save")
     public R<Integer> batchSave(@RequestBody List<YktGrantDetail> list) {
         int n = 0;
-        for (YktGrantDetail d : list) if (d.getId() != null) { checkIdCards(d); assertDetailScope(d.getId()); requireDetailEditable(d.getId()); n += grantMapper.updateById(d); }
+        for (YktGrantDetail d : list) if (d.getId() != null) {
+            checkIdCards(d); assertDetailScope(d.getId()); requireDetailEditable(d.getId());
+            sanitizeDetailUpdate(d);
+            n += grantMapper.updateById(d);
+        }
         return R.ok(n);
     }
 
-    /** 删除选中明细 */
+    /**
+     * 修改明细的请求体净化（两条修改路径共用）：
+     * ① 清 BATCH_ID/BATCH_CODE —— 归属不可由请求体改。上游的 assertDetailScope/requireDetailEditable 都是按
+     *    detailId 从库里反查**旧** batchId 做校验，而 updateById 会把请求体里的新 batchId 直接写库：
+     *    在本乡镇普通批次建一条明细拿到 id，再 POST {"id":id,"batchId":别的批次} 就能把人搬进更正批次
+     *    （绕过 assertNotCorrection）甚至别县批次（绕过县域隔离）。
+     * ② 更正批次禁改身份三件套 —— 「人员固定」的含义就是不能换人；改身份证等于把退回的钱发给另一个人，
+     *    而送审校验只查「新身份证在补贴对象库里存在」，换成库里任何人都能过。金额/银行账号仍可改（那正是更正的目的）。
+     */
+    private void sanitizeDetailUpdate(YktGrantDetail d) {
+        d.setBatchId(null);
+        d.setBatchCode(null);
+        YktGrantDetail old = grantMapper.selectById(d.getId());
+        if (old == null) return;
+        if (Integer.valueOf(1).equals(correctionFlagOf(old.getBatchId()))) {
+            boolean changed = differs(d.getBeneficiaryIdCard(), old.getBeneficiaryIdCard())
+                    || differs(d.getHolderIdCard(), old.getHolderIdCard())
+                    || differs(d.getPayeeIdCard(), old.getPayeeIdCard());
+            if (changed) throw new BizException("更正发放批次人员固定，不可变更享受人/户主/收款人身份证号"
+                    + "（如需不发放请用「停发」，金额与银行账号可正常修改）");
+        }
+    }
+
+    /** 请求体给了值且与库中原值不同才算「改了」（null=未提交该字段，MP 本就忽略）。 */
+    private static boolean differs(String req, String old) {
+        return req != null && !req.trim().equals(old == null ? "" : old.trim());
+    }
+
+    private Integer correctionFlagOf(Long batchId) {
+        YktBatch b = batchId == null ? null : batchMapper.selectById(batchId);
+        return b == null ? null : b.getIsCorrection();
+    }
+
+    /** 删除选中明细（更正批次不可删人：人员集合固定，少一个人退回的钱就发不出去） */
     @DeleteMapping
     public R<Void> delete(@RequestParam String ids) {
         List<Long> idList = new ArrayList<>();
         for (String s : ids.split(",")) if (!s.isBlank()) idList.add(Long.valueOf(s.trim()));
-        for (Long id : idList) { assertDetailScope(id); requireDetailEditable(id); }   // 县域越权 + 状态机守卫
+        // 县域越权 + 状态机守卫 + 更正批次守卫
+        for (Long id : idList) { assertDetailScope(id); requireDetailEditable(id); assertDetailNotCorrection(id); }
         if (!idList.isEmpty()) grantMapper.deleteBatchIds(idList);
         return R.ok();
     }
@@ -396,6 +502,7 @@ public class YktRosterEditController {
 
         assertScope(batchId);
         requireEditable(batchId);
+        assertNotCorrection(batchId, "批量填报");
         YktBatch batch = batchMapper.selectById(batchId);
         QueryWrapper<YktBeneficiary> bw = new QueryWrapper<>();
         Long t = tid();
@@ -442,7 +549,37 @@ public class YktRosterEditController {
     }
 
     /**
-     * 乡镇经办岗送审：补贴对象库一致性校验通过后 ISSUED -> SUBMITTED，进入乡镇审核岗(TOWN_AUDIT)。
+     * 审核岗中文名（与 YktAuditController.STAGE 同源口径，用于流程进度「待审岗」列 + 送审提示）。
+     * 用 HashMap 不用 Map.of()：REJECT_STAGE 为 null（从未被退回）是常态，
+     * 而 Map.of() 生成的不可变 Map 的 containsKey(null)/get(null) 会抛 NPE。
+     */
+    private static final Map<String, String> STAGE_LABEL = new HashMap<>() {{
+        put("TOWN_AUDIT",  "乡镇审核");
+        put("DEPT_OP",     "部门经办审核");
+        put("DEPT_REVIEW", "部门领导审核");
+    }};
+
+    /**
+     * 送审目标岗：被退回过的清册「原岗续审」——直接回当初退回它的那一岗，不重跑前面几岗；
+     * 从未被退回（REJECT_STAGE 空）或值不合法时按原口径进乡镇审核。
+     */
+    private static String resumeStage(String rejectStage) {
+        return STAGE_LABEL.containsKey(rejectStage) ? rejectStage : "TOWN_AUDIT";
+    }
+
+    /**
+     * 送审后、还没被任何审核岗经手时的状态文本。
+     * 二次送审单独用「重新送审」而不是复用「送审」：审核页状态列直接显示 LAST_RESULT，
+     * 都写「送审」的话，跳级停在部门领导岗的清册看着像刚从乡镇上来的，前两岗过没过分不出来。
+     * 「可取消送审 / 仍属编制岗视野」的判据认这两个值（历史数据只有「送审」，照旧匹配）。
+     */
+    private static final String SUBMIT_TEXT = "送审";
+    private static final String RESUBMIT_TEXT = "重新送审";
+    private static final List<String> SUBMIT_TEXTS = List.of(SUBMIT_TEXT, RESUBMIT_TEXT);
+
+    /**
+     * 乡镇经办岗送审：补贴对象库一致性校验通过后 ISSUED -> SUBMITTED。
+     * 目标岗见 {@link #resumeStage}：首次送审进乡镇审核岗，被退回过的直接回退回岗续审。
      * 校验不过时返回 {ok:false, errors:[...]} 给前端「信息校验日志」弹窗展示，批次状态不动。
      */
     @PostMapping("/{batchId}/submit")
@@ -451,14 +588,19 @@ public class YktRosterEditController {
         List<String> errs = validateForSubmit(batchId);
         if (!errs.isEmpty()) return R.ok(Map.of("ok", false, "errors", errs));
         refreshBatchTotals(batchId);
+        YktBatch b = batchMapper.selectById(batchId);
+        boolean resumed = b != null && STAGE_LABEL.containsKey(b.getRejectStage());   // 退回过=原岗续审
+        String target = resumeStage(b == null ? null : b.getRejectStage());
+        String targetLabel = STAGE_LABEL.getOrDefault(target, target);
+        String resultText = resumed ? RESUBMIT_TEXT : SUBMIT_TEXT;
         // 条件更新：仅已下达(ISSUED)批次可送审，0 行=状态已变更（并发/越权直连）
         int r = batchMapper.update(null, new com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper<YktBatch>()
                 .eq("ID", batchId).eq("STATUS", "ISSUED")
-                .set("STATUS", "SUBMITTED").set("AUDIT_STAGE", "TOWN_AUDIT").set("LAST_RESULT", "送审"));
+                .set("STATUS", "SUBMITTED").set("AUDIT_STAGE", target).set("LAST_RESULT", resultText));
         if (r == 0) throw new BizException("仅已下达待编制的批次可送审（状态已变更，请刷新）");
-        // 流程进度：乡镇录入 --送审--> 乡镇审核
-        writeAuditLog(batchId, "乡镇录入", "审核", "送审", "", "乡镇审核");
-        return R.ok(Map.of("ok", true));
+        // 流程进度：乡镇录入 --送审--> 目标岗（退回过的清册这里就是退回岗，一眼能看出跳过了哪几岗）
+        writeAuditLog(batchId, "乡镇录入", "审核", resultText, "", targetLabel);
+        return R.ok(Map.of("ok", true, "stage", target, "stageLabel", targetLabel, "resumed", resumed));
     }
 
     private static String nz(String s) { return s == null ? "" : s.trim(); }
@@ -560,14 +702,18 @@ public class YktRosterEditController {
         return errs;
     }
 
-    /** 取消送审：SUBMITTED+TOWN_AUDIT -> ISSUED（仅刚送审、还没被乡镇审核经手的批次可撤回） */
+    /**
+     * 取消送审：SUBMITTED -> ISSUED（仅刚送审、还没被任何审核岗经手的批次可撤回）。
+     * 判据用 LAST_RESULT 属送审态（送审/重新送审）而非固定 AUDIT_STAGE='TOWN_AUDIT'——「原岗续审」后
+     * 批次可能直接停在部门经办/部门领导岗，同样属于没人动过、应可撤回；被审过 LAST_RESULT 就变「乡镇已审」等。
+     */
     @PostMapping("/{batchId}/unsubmit")
     public R<Void> unsubmit(@PathVariable Long batchId) {
         assertScope(batchId);
         int r = batchMapper.update(null, new com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper<YktBatch>()
-                .eq("ID", batchId).eq("STATUS", "SUBMITTED").eq("AUDIT_STAGE", "TOWN_AUDIT")
+                .eq("ID", batchId).eq("STATUS", "SUBMITTED").in("LAST_RESULT", SUBMIT_TEXTS)
                 .set("STATUS", "ISSUED").set("AUDIT_STAGE", "DRAFT").set("LAST_RESULT", "待编制"));
-        if (r == 0) throw new BizException("仅刚送审（待乡镇审核）的批次可取消送审");
+        if (r == 0) throw new BizException("仅刚送审、尚未被审核岗经手的批次可取消送审");
         return R.ok();
     }
 
@@ -618,7 +764,10 @@ public class YktRosterEditController {
         assertScope(batchId);
         YktBatch b = batchMapper.selectById(batchId);
         if (b == null) throw new BizException("批次不存在");
-        if (b.getBatchName() != null && b.getBatchName().startsWith("更正发放"))
+        // 判 IS_CORRECTION 而非批次名前缀（批次名可在「批次维护」改，改了前缀这道守卫就形同虚设）；
+        // 兼容 IS_CORRECTION 列上线前、且回填后又被改名的极端老数据，前缀判断保留作兜底。
+        if (Integer.valueOf(1).equals(b.getIsCorrection())
+                || (b.getBatchName() != null && b.getBatchName().startsWith("更正发放")))
             throw new BizException("更正发放批次由系统重构生成，不可删除");
         if (!"NEW".equals(b.getStatus()) && !"ISSUED".equals(b.getStatus()))
             throw new BizException("批次[" + b.getBatchName() + "]已进入审核/支付流程，不可删除");
@@ -702,6 +851,7 @@ public class YktRosterEditController {
     public R<Map<String, Object>> importExcel(@RequestParam Long batchId, @RequestParam("file") MultipartFile file) throws Exception {
         assertScope(batchId);
         requireEditable(batchId);
+        assertNotCorrection(batchId, "导入名单");
         YktBatch batch = batchMapper.selectById(batchId);
         List<YktTplItem> cols = tplService.columnsOf(batch.getProjectId());
 

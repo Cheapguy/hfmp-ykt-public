@@ -43,6 +43,7 @@ public class YktAuditController {
 
     /** 待审岗中文名（auditStage = 当前待审岗，对齐生产流程进度） */
     private static final Map<String, String> STAGE = new LinkedHashMap<>() {{
+        put("DRAFT",       "乡镇录入");   // 链首：退回/撤回到录入时的待审岗名（缺这条会往日志里落英文 DRAFT）
         put("TOWN_AUDIT",  "乡镇审核");
         put("DEPT_OP",     "部门经办审核");
         put("DEPT_REVIEW", "部门领导审核");
@@ -234,10 +235,17 @@ public class YktAuditController {
                     throw new BizException("批次[" + b.getBatchName() + "]不在您可撤回范围（仅能撤回已流过本岗、且仍在审批中的清册）");
                 target = myStage;                 // 上游岗把清册拉回自己环节
             }
+            // 停留文案：常规链路用「到达该岗时上一岗已审」的口径(ARRIVED_TEXT)；
+            // 但「原岗续审」的清册是从乡镇录入直接跳到退回岗的，前面几岗根本没审过，
+            // 再写「乡镇已审」「部门经办已审」就是假的——这类一律回中性的「重新送审」。
+            // 注意别用「重新送审」当这里的文案：那个词在 YktRosterEditController.SUBMIT_TEXTS 里表示
+            // 「送审后没人审过、可取消送审」，用了会让批次重新掉进乡镇的待编制清册列表并能被撤回。
+            boolean resumed = b.getRejectStage() != null && !"DRAFT".equals(target);
+            String arrived = resumed ? "续审中" : ARRIVED_TEXT.getOrDefault(target, target);
             // 条件回退（并发防护）：状态与阶段都要还停在读到的样子才生效
             UpdateWrapper<YktBatch> w = new UpdateWrapper<YktBatch>()
                     .eq("ID", b.getId()).eq("AUDIT_STAGE", b.getAuditStage()).eq("STATUS", b.getStatus())
-                    .set("AUDIT_STAGE", target).set("LAST_RESULT", ARRIVED_TEXT.getOrDefault(target, target));
+                    .set("AUDIT_STAGE", target).set("LAST_RESULT", arrived);
             if ("DRAFT".equals(target)) w.set("STATUS", "ISSUED");   // 撤回到录入=回已下达可编辑态，重进编制花名册
             if (batchMapper.update(null, w) == 0)
                 throw new BizException("批次[" + b.getBatchName() + "]状态已变更，请刷新后重试");
@@ -261,13 +269,15 @@ public class YktAuditController {
             // 仅审核中批次可退回；终审/已退回/未送审不可退回（终审撤销请用取消审核）
             if (!"SUBMITTED".equals(b.getStatus()) || "DRAFT".equals(b.getAuditStage()) || "DONE".equals(b.getAuditStage()))
                 throw new BizException("批次[" + b.getBatchName() + "]非审核中状态，无法退回");
-            String result = b.getAuditStage().startsWith("DEPT") ? "部门退回" : "乡镇退回";
-            // 条件退回（并发防护）：退回乡镇经办岗=回已下达可编辑态，离开审核链，重编花名册后再送审
+            String result = b.getAuditStage().startsWith("DEPT") ? "部门审核退回" : "乡镇审核退回";
+            // 条件退回（并发防护）：退回乡镇经办岗=回已下达可编辑态，离开审核链，重编花名册后再送审。
+            // REJECT_STAGE 记住是哪一岗退的：乡镇经办改完再送审直接回该岗续审，不重跑前面几岗。
             int r = batchMapper.update(null, new UpdateWrapper<YktBatch>()
                     .eq("ID", b.getId()).eq("STATUS", "SUBMITTED").eq("AUDIT_STAGE", b.getAuditStage())
-                    .set("STATUS", "ISSUED").set("AUDIT_STAGE", "DRAFT").set("LAST_RESULT", result));
+                    .set("STATUS", "ISSUED").set("AUDIT_STAGE", "DRAFT")
+                    .set("REJECT_STAGE", b.getAuditStage()).set("LAST_RESULT", result));
             if (r == 0) throw new BizException("批次[" + b.getBatchName() + "]状态已变更，请刷新后重试");
-            writeLog(b, "退回", result, opinion, "乡镇经办岗");
+            writeLog(b, "退回", result, opinion, "DRAFT");   // 待审岗→「乡镇录入」（经 STAGE 映射，对齐生产流程进度）
         }
         return R.ok();
     }

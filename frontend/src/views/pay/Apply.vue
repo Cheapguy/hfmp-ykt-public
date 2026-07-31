@@ -151,9 +151,12 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { paymentApi, projectApi } from '../../api/system'
+
+const route = useRoute()
 
 const APPLY_LABEL = { PENDING_SUBMIT: '待送审', SUBMITTED: '已送审', PAID: '已支付' }
 const STATUS_LABEL = { SENT: '待支付', PAID: '已支付', PAID_OUT: '已发放' }
@@ -170,8 +173,25 @@ const filteredProjects = computed(() => {
   return kw ? projects.value.filter(p => (`[${p.projectCode}]${p.projectName}`).includes(kw)) : projects.value
 })
 
+// 工作台「待发起支付」点入：带 projectId，自动选中该项目并载入其待支付批次
+async function applyRouteQuery() {
+  const pid = route.query.projectId ? String(route.query.projectId) : ''
+  if (!pid) return
+  const p = projects.value.find(x => String(x.id) === pid)
+  if (p) await selectProject(p)
+  // 项目不在可选范围（未纳入/无授权）时给个交代，否则页面空白无选中，看着像点击没生效
+  else ElMessage.warning('该批次所属项目不在您的可选范围，请手动检索项目')
+}
+
 onMounted(async () => {
   projects.value = (await projectApi.list({ included: 1, tab: 'all' })) || []
+  await applyRouteQuery()
+})
+// 守 ownPath + 监听具体键：keep-alive 不暂停 watcher、route 全应用共享，不守会被别页导航触发
+const ownPath = route.path
+watch(() => route.query.projectId, () => {
+  if (route.path !== ownPath) return
+  applyRouteQuery()
 })
 
 function money(v) { return v == null ? '' : Number(v).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }

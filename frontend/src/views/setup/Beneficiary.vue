@@ -15,7 +15,7 @@
         <el-button :loading="exporting" @click="doExport">导出</el-button>
         <el-button @click="cancelSel">注销</el-button>
         <el-button @click="uncancelSel">取消注销</el-button>
-        <el-button @click="referVisible = true">引用</el-button>
+        <el-button @click="openRefer()">引用</el-button>
         <el-badge :value="referReqCount + approvedCount" :hidden="!(referReqCount + approvedCount)" type="danger">
           <el-button @click="openReferReq()">引用请求</el-button>
         </el-badge>
@@ -213,14 +213,15 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, nextTick, onMounted } from 'vue'
+import { ref, reactive, computed, nextTick, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { Plus, Edit, Delete, Tickets } from '@element-plus/icons-vue'
 import CrudTable from '../../components/CrudTable.vue'
 import { beneficiaryApi, villageApi, orgApi, bankApi, referReqApi } from '../../api/system'
 
 const route = useRoute()
+const router = useRouter()
 
 /* ============ 数据字典 ============ */
 const STATUS_OPTS = [{ label: '0-作废', value: '0' }, { label: '1-正常', value: '1' }, { label: '2-停用', value: '2' }]
@@ -270,8 +271,26 @@ onMounted(async () => {
   villages.value = (await villageApi.list({})) || []
   setOpt('townId', towns.value.map(t => ({ label: `${cMap[String(t.parentId)] || ''} ${t.orgName}`, value: t.id })))
   setOpt('villageId', villages.value.map(v => ({ label: `${v.villageCode}-${v.villageName}`, value: v.id })))
+  applyRouteQuery()
+})
+
+// 工作台点入自动开弹窗(mine=我发起的/其它=待我审核)。
+// 本页标签被 keep-alive 缓存、:key 不含 query：标签留着时从工作台再点一次待办不会重挂组件，
+// 只写在 onMounted 里弹窗就不弹了，故补一个 query 监听。
+function applyRouteQuery() {
   refreshReferCount()
-  if (route.query.referReq) openReferReq(route.query.referReq)   // 工作台点入自动开弹窗(mine=我发起的/其它=待我审核)
+  const req = route.query.referReq
+  if (!req) return
+  openReferReq(req)
+  // 开完即清 query：标签的 fullPath 冻结在 ?referReq=xxx，不清的话关掉弹窗后每次切回本标签都会自动重开，
+  // 且下次从工作台点同一条待办时 query 值没变、watch 不触发，弹窗反而弹不出来。
+  router.replace({ path: route.path, query: {} })
+}
+// 守 ownPath + 监听具体键（keep-alive 不暂停 watcher、route 全应用共享，不守会被别页导航触发）
+const ownPath = route.path
+watch(() => route.query.referReq, () => {
+  if (route.path !== ownPath) return
+  applyRouteQuery()
 })
 
 /* ============ 列表列（对齐生产，含全部富字段）============ */
@@ -349,7 +368,7 @@ const cardFields = [
 /* ============ 修改单据表单（对齐生产 3 列布局）============ */
 const formFields = [
   { prop: 'status',        label: '状态',          span: 8, type: 'select', options: STATUS_OPTS, default: '1' },
-  { prop: 'referred',      label: '是否引用',      span: 8, type: 'select', options: [{ label: '0-否', value: 0 }, { label: '1-是', value: 1 }] },
+  // 「是否引用」不入表单：它由引用请求审批流置位，后端已忽略客户端传值，留个能选却不生效的框只会误导
   { prop: 'householdCode', label: '农户编码',      span: 8, maxlength: 32 },
   { prop: 'villageId',     label: '村(居)委会',    span: 8 },
   { prop: 'groupName',     label: '村(居)民小组',  span: 8, maxlength: 16 },
@@ -494,6 +513,11 @@ async function batchSave() {
 
 const crud = ref()
 const referVisible = ref(false); const referId = ref(''); const referResult = ref(null); const referSearched = ref(false)
+// 每次开弹窗清检索态：不清的话重开会显示上次查到的人，直接点「确定引用」就拿旧人进了申请流程
+function openRefer() {
+  referId.value = ''; referResult.value = null; referSearched.value = false
+  referVisible.value = true
+}
 async function doRefer() {
   referSearched.value = true
   const r = await beneficiaryApi.refer(referId.value)
@@ -565,7 +589,10 @@ async function includeReq(row) {
   loadMine(); refreshReferCount(); crud.value?.reload?.()
 }
 const fmtTime = (t) => t ? String(t).replace('T', ' ').slice(0, 16) : ''
-const referStatusTag = (s) => ({ PENDING: 'info', APPROVED: 'warning', REJECTED: 'danger', INCLUDED: 'success' }[s] || 'info')
+const referStatusTag = (s) => ({
+  PENDING: 'info', APPROVED: 'warning', REJECTED: 'danger',
+  INCLUDING: 'warning', INCLUDED: 'success', VOIDED: 'danger'   // VOIDED=纳入时原始档已删/已迁出，自动作废可重发
+}[s] || 'info')
 
 /* ============ 导入 / 导出（对齐生产「导入选项」）============ */
 const fileInput = ref(null)

@@ -146,7 +146,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Select, Back, RefreshLeft } from '@element-plus/icons-vue'
@@ -168,13 +168,27 @@ function ensureSelected() {
   return true
 }
 
+// 工作台待办点入：默认选中对应项目/批次（Long 已按字符串序列化，直接用，勿 Number 丢精度）
+function applyRouteQuery() {
+  if (route.query.projectId) query.projectId = String(route.query.projectId)
+  if (route.query.batchCode) query.batchCode = String(route.query.batchCode)
+  page.pageNum = 1
+  reload()
+}
+
 onMounted(async () => {
   // tab:'all' 去掉项目审核状态过滤——否则默认 tab=pending 会 ne APPROVED，与 included=1(已纳入即已终审)冲突→无数据
   projects.value = (await projectApi.list({ included: 1, tab: 'all' })) || []
-  // 工作台待办点入：默认选中对应项目/批次（Long 已按字符串序列化，直接用，勿 Number 丢精度）
-  if (route.query.projectId) query.projectId = String(route.query.projectId)
-  if (route.query.batchCode) query.batchCode = String(route.query.batchCode)
-  reload()
+  applyRouteQuery()
+})
+
+// keep-alive 缓存标签、:key 不含 query：标签留着再点另一条待办不会重挂组件，靠 watch 补回填。
+// 必须守 ownPath + 监听具体键：/dept/correction 用同一组 query 键，且 keep-alive 不暂停 watcher、
+// route 全应用共享——不守就会被「待更正」的导航串改本页筛选（详见 Correction.vue 同处注释）。
+const ownPath = route.path
+watch([() => route.query.projectId, () => route.query.batchCode], () => {
+  if (route.path !== ownPath) return
+  applyRouteQuery()
 })
 
 async function reload() {

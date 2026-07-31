@@ -260,6 +260,23 @@ public class DataScopeResolver {
     }
 
     /**
+     * 「须本乡镇亲自操作」断言：判**经办者身份**而非数据范围，用于两方审批这类不能一人分饰两角的场景。
+     *
+     * <p>与 {@link #assertTown} 的区别：COUNTY 范围账号（县级部门）allowedTowns 覆盖全县乡镇，
+     * assertTown 会同时放行「甲乡镇发起」和「乙乡镇审批」，一个县级账号就能把两方流程独自走完。
+     * 本方法要求 townId == 本人机构 id，县级账号（机构挂部门而非乡镇）自然进不来——
+     * 县级仍能通过数据范围**看见**这些数据，只是点不动。
+     *
+     * <p>ALL（管理员）放行：属运维兜底通道，不是业务角色（它本就能直接改库，拦无意义）。
+     */
+    public void assertOwnTown(Long townId, String label) {
+        Ctx c = current();
+        if (c.scope == Scope.ALL) return;
+        if (townId == null || !townId.equals(c.ownTownId))
+            throw new BizException("仅" + label + "本机构账号可执行此操作");
+    }
+
+    /**
      * 经批次 id 反查乡镇后兜底（本表无 townId、只握 batchId 的接口用，如花名册/更正/支付）。
      * 管理员免查直接放行；非管理员批次不存在按越权处理（防直连传别县 batchId 探测）。
      */

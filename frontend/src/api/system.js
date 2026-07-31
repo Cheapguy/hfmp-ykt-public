@@ -52,11 +52,11 @@ export const beneficiaryApi = {
 // ===== 引用请求审批流（乡镇 A 引用 → 乡镇 B 审核确认）=====
 export const referReqApi = {
   submit:   (data) => request.post('/setup/refer-request', data),
-  pending:  () => request.get('/setup/refer-request/pending'),          // 被引用乡镇：待我审核
+  pending:  (cfg) => request.get('/setup/refer-request/pending', cfg),  // 被引用乡镇：待我审核
   count:    () => request.get('/setup/refer-request/pending-count'),
   approve:  (id) => request.post(`/setup/refer-request/${id}/approve`),
   reject:   (id, remark) => request.post(`/setup/refer-request/${id}/reject`, { remark }),
-  mine:     () => request.get('/setup/refer-request/mine'),             // 引用方：我发起的(带状态)
+  mine:     (cfg) => request.get('/setup/refer-request/mine', cfg),     // 引用方：我发起的(带状态)
   approvedCount: () => request.get('/setup/refer-request/approved-count'),
   include:  (id) => request.post(`/setup/refer-request/${id}/include`)  // 引用方：纳入补贴对象库
 }
@@ -124,7 +124,7 @@ export const batchApi = {
 
 // ===== 更正发放 / 批次重构（手册 §十一 八） =====
 export const correctionApi = {
-  list:    (params) => request.get('/dept/correction/list', { params }),
+  list:    (params, cfg) => request.get('/dept/correction/list', { params, ...cfg }),
   rebuild: (detailIds) => request.post('/dept/correction/rebuild', { detailIds })
 }
 
@@ -148,14 +148,14 @@ export const quotaApi = {
   saveRule:   (data) => request.post('/pay/quota/save-rule', data)
 }
 export const paymentApi = {
-  pending: (projectId) => request.get('/pay/apply/pending', { params: { projectId } }),
+  pending: (projectId, cfg) => request.get('/pay/apply/pending', { params: { projectId }, ...cfg }),
   paid:    (projectId) => request.get('/pay/apply/paid', { params: { projectId } }),
   preview: (batchId) => request.get('/pay/apply/preview', { params: { batchId } }),
   gen:     (data) => request.post('/pay/apply/gen', data),
   revoke:  (batchId) => request.post('/pay/apply/revoke', { batchId }),
   detail:  (batchId) => request.get(`/pay/apply/${batchId}/detail`),
   page:    (params) => request.get('/pay/apply/page', { params }),
-  submitList: (status) => request.get('/pay/apply/submit-list', { params: { status } }),
+  submitList: (status, cfg) => request.get('/pay/apply/submit-list', { params: { status }, ...cfg }),
   submit:  (id) => request.post(`/pay/apply/${id}/submit`),
   grantList: (id) => request.get(`/pay/apply/${id}/grant-list`),
   bankPay: (id, fails) => request.post(`/pay/apply/${id}/bank-pay`, { fails }),
@@ -164,7 +164,7 @@ export const paymentApi = {
 
 // ===== 发放数据审核 =====
 export const auditApi = {
-  page:      (params) => request.get('/dept/audit/page', { params }),
+  page:      (params, cfg) => request.get('/dept/audit/page', { params, ...cfg }),
   history:   (id) => request.get(`/dept/audit/${id}/history`),
   audit:       (ids, opinion) => request.post('/dept/audit/audit', { ids, opinion }),
   cancelAudit: (ids, opinion) => request.post('/dept/audit/cancel-audit', { ids, opinion }),
@@ -186,7 +186,7 @@ export const queryApi = {
 
 // ===== 编制花名册 =====
 export const rosterEditApi = {
-  pending:    (params) => request.get('/dept/roster/pending', { params }),
+  pending:    (params, cfg) => request.get('/dept/roster/pending', { params, ...cfg }),
   info:       (batchId) => request.get(`/dept/roster/${batchId}/info`),
   page:       (params) => request.get('/dept/roster/page', { params }),
   save:       (data) => request.post('/dept/roster', data),

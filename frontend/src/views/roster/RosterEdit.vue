@@ -5,7 +5,7 @@
       <el-button type="primary" :disabled="isCorrection || locked" @click="openSingle()">新增</el-button>
       <el-button :disabled="locked" @click="editSelected">修改</el-button>
       <el-button :disabled="isCorrection || locked" @click="openFill">批量填报</el-button>
-      <el-button :disabled="locked" @click="delSelected">删除</el-button>
+      <el-button :disabled="isCorrection || locked" @click="delSelected">删除</el-button>
       <el-button :disabled="locked" @click="openBatchEdit">批量修改</el-button>
       <el-button :disabled="locked" @click="doSubmit">送审</el-button>
       <el-button :disabled="!locked" @click="doUnsubmit">取消送审</el-button>
@@ -23,7 +23,7 @@
         <div class="sf"><label>发放批次：</label>
           <el-select v-model="batchId" filterable style="width:340px" @change="onBatchChange">
             <el-option v-for="b in batchOptions" :key="b.id"
-              :label="`${b.batchCode || ''}-${b.batchName}${b.status === 'SUBMITTED' ? '（已送审）' : ''}`" :value="String(b.id)" />
+              :label="`${b.batchCode || ''}-${b.batchName}${b.status === 'SUBMITTED' ? '（已送审）' : (b.rejectStage ? `（${b.tag}）` : '')}`" :value="String(b.id)" />
           </el-select>
         </div>
         <div class="sf"><label>户主姓名：</label><el-input v-model="q.holderName" clearable @keyup.enter="reload" /></div>
@@ -56,7 +56,7 @@
         <template v-for="g in gridGroups" :key="g.key">
           <el-table-column v-if="g.cols.length" :label="g.label" align="center">
             <el-table-column v-for="c in g.cols" :key="c.key" :label="c.label"
-              :width="c.width" :align="c.align || 'left'" show-overflow-tooltip>
+              :width="c.width" :align="c.align || 'left'" :show-overflow-tooltip="c.tip !== false">
               <template #default="{ row }">{{ cellVal(row, c) }}</template>
             </el-table-column>
           </el-table-column>
@@ -70,7 +70,7 @@
       </el-table>
       <div class="pager">
         <el-pagination v-model:current-page="page.pageNum" v-model:page-size="page.pageSize" :total="page.total"
-          :page-sizes="[50,100,200,500]" layout="total, sizes, prev, pager, next, jumper" background
+          :page-sizes="[20,50,100,200]" layout="total, sizes, prev, pager, next, jumper" background
           @size-change="reload" @current-change="reload" />
       </div>
     </el-card>
@@ -144,6 +144,12 @@
           </div>
         </template>
       </div>
+      <!-- 到户模式下户主本人无档案的整户不列出（钱必须进户主账户，不能回落成员本人） -->
+      <el-alert v-if="fillSkip.households" type="warning" show-icon :closable="false" class="fill-skip-tip"
+        :title="`本次有 ${fillSkip.households} 户（${fillSkip.people} 人）因户主档案缺失未列出，请先在补贴对象维护中补录户主本人档案。`" />
+      <!-- 候选取数上限 500，跳过整户后条数还会变少：不提示的话乡镇经办会以为「人就这么些」 -->
+      <el-alert v-if="candidates.length >= 500 - fillSkip.people" type="info" show-icon :closable="false" class="fill-skip-tip"
+        title="候选最多显示 500 条，如未找到目标人员请用「行政村 / 享受人姓名」缩小范围后再查询。" />
       <el-table ref="candTable" v-loading="fillLoading" :data="candidates" border stripe size="small"
         height="60vh" row-key="_k" @selection-change="onCandSelect">
         <el-table-column type="selection" width="42" reserve-selection />
@@ -247,7 +253,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, watch, nextTick } from 'vue'
+import { ref, shallowRef, reactive, computed, onMounted, watch, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { rosterEditApi, villageApi, orgApi, bankApi } from '../../api/system'
@@ -267,10 +273,14 @@ const batchOptions = ref([])
 const batchTownId = ref(null)
 const searchExpanded = ref(false)
 const q = reactive({ holderName: '', holderIdCard: '', payeeName: '', payeeIdCard: '', bankAccount: '', beneficiaryName: '', beneficiaryIdCard: '' })
-const rows = ref([]); const loading = ref(false)
+// shallowRef：本表只整体替换 rows（reload），从不就地改行属性。
+// 用深响应式会给 100 行 × 20+ 字段各建一层 Proxy 并在渲染时逐格收集依赖，是宽表滚动/重绘卡顿的一大来源。
+// ⚠ 后续若要单行原地更新，改回 ref 或用 triggerRef，不然 UI 不会动。
+const rows = shallowRef([]); const loading = ref(false)
 const selected = ref([])
 const rosterTable = ref()   // 主表实例：切批次时清 reserve-selection 保留集（防幽灵勾选带失效 id）
-const page = reactive({ pageNum: 1, pageSize: 100, total: 0 })
+// 默认 50：el-table 无虚拟滚动，100 行 × 20+ 列 = 2000+ 单元格，横向拖拽重绘面积过大
+const page = reactive({ pageNum: 1, pageSize: 50, total: 0 })
 // 全国联行号库 1.7 万行：不整表下发。花名册按名称存银行，bankCache 存 名称→行号（本页解析 + 搜索结果）
 const bankCache = reactive({}); const bankLoading = ref(false); const villages = ref([])
 const mergeBankNames = (arr) => (arr || []).forEach(b => { if (b && b.bankName) bankCache[b.bankName] = b.unionCode || b.bankCode || '' })
@@ -284,7 +294,14 @@ const bankSearchOpts = computed(() => Object.keys(bankCache).map(name => ({
 
 const currentBatch = computed(() => batchOptions.value.find(x => String(x.id) === String(batchId.value)))
 // 更正发放（重构）批次：人员固定复制而来，禁止新增/批量填报/导入/删除批次
-const isCorrection = computed(() => !!currentBatch.value && (currentBatch.value.batchName || '').startsWith('更正发放'))
+// 更正发放批次：人员从源批次固定复制，禁 新增/批量填报/导入/删除批次。
+// 以后端 isCorrection 字段为准，不再靠批次名前缀——批次名在「批次维护」页可改，改了前缀限制就失效；
+// 前缀判断留作兜底（IS_CORRECTION 列上线前、回填后又被改名的老数据）。后端各写入口另有断言，置灰只防误触。
+const isCorrection = computed(() => {
+  const b = currentBatch.value
+  if (!b) return false
+  return Number(b.isCorrection) === 1 || String(b.batchName || '').startsWith('更正发放')
+})
 // 已送审锁定：编辑类按钮全灰，仅「取消送审」可用（送审后花名册不可再改）
 const locked = computed(() => currentBatch.value?.status === 'SUBMITTED')
 
@@ -324,13 +341,16 @@ const GROUP_ORDER = [
   ['BENEFICIARY', '补贴对象信息'], ['GRANT', '发放信息'], ['EXT', '扩展信息']
 ]
 // 绑定列的展示参数（宽度/对齐）；自由列统一 120
+// tip:false = 关掉 show-overflow-tooltip。EP 的溢出判定是 hover 时实测文本宽度（强制同步布局），
+// 滚动时内容从指针下划过会批量触发。定长内容（身份证/账号/电话/金额/日期）列宽已足够，不可能溢出，全关。
 const BIND_META = {
-  holderName: { width: 90 }, holderIdCard: { width: 170 },
-  payeeName: { width: 90 }, payeeIdCard: { width: 170 }, bankAccount: { width: 180 }, bankName: { width: 260 },
+  holderName: { width: 90 }, holderIdCard: { width: 170, tip: false },
+  payeeName: { width: 90 }, payeeIdCard: { width: 170, tip: false },
+  bankAccount: { width: 180, tip: false }, bankName: { width: 260 },
   villageName: { width: 140 }, groupName: { width: 110 }, beneficiaryName: { width: 90 },
-  beneficiaryIdCard: { width: 170 }, phone: { width: 120 },
-  standard: { width: 100, align: 'right' }, amount: { width: 110, align: 'right' },
-  fillDate: { width: 120, align: 'center' }
+  beneficiaryIdCard: { width: 170, tip: false }, phone: { width: 120, tip: false },
+  standard: { width: 100, align: 'right', tip: false }, amount: { width: 110, align: 'right', tip: false },
+  fillDate: { width: 120, align: 'center', tip: false }
 }
 // tpl-cols 拉不到时的兜底：默认 18 列布局（与内置默认模板一致）
 const FALLBACK_COLS = [
@@ -352,20 +372,30 @@ const colsSig = computed(() => tplGridCols.value.map(c => c.key).join('|'))
 const gridGroups = computed(() => GROUP_ORDER.map(([key, label]) => {
   const cols = tplGridCols.value.filter(c => c.group === key)
     .map(c => ({ ...c, width: 120, ...(BIND_META[c.bind] || {}) }))
-  if (key === 'BENEFICIARY' && cols.length) cols.push({ key: '__age', label: '年龄', bind: 'age', width: 64, align: 'center' })
+  if (key === 'BENEFICIARY' && cols.length) cols.push({ key: '__age', label: '年龄', bind: 'age', width: 64, align: 'center', tip: false })
   return { key, label, cols }
 }))
 function cellVal(row, c) {
   const b = c.bind
-  if (!b) return extVal(row, c.key)
-  if (b === 'bankName') return bankDisp(row.bankName)
+  if (!b) return row._ext ? (row._ext[c.key] ?? '') : ''
+  if (b === 'bankName') return row._bankDisp ?? bankDisp(row.bankName)
   if (b === 'standard') return money(row.standard)
   if (b === 'amount') return row.payStatus === '已停发' ? money(0) : money(row.amount)
   return row[b] ?? ''
 }
-function extVal(row, key) {
-  if (!row.extJson) return ''
-  try { return (JSON.parse(row.extJson) || {})[key] ?? '' } catch { return '' }
+// 派生列一次性预计算（在裸数组上跑，还没进响应式）：
+// 原先 extJson 每个自由列单元格每次渲染都 JSON.parse 一遍，整表 patch 一次要跑几百次同步解析。
+// 派生字段设为不可枚举：编辑弹窗是 Object.assign(form, blank(), row) 整行拷贝后提交，
+// 可枚举的话 _ext/_bankDisp 会混进请求体被后端当未知字段拒掉；JSON.stringify 同样跳过。
+const hide = (o, k, v) => Object.defineProperty(o, k, { value: v, writable: true, configurable: true, enumerable: false })
+function decorate(list) {
+  for (const r of list) {
+    let ext = {}
+    if (r.extJson) { try { ext = JSON.parse(r.extJson) || {} } catch { /* 脏数据按空扩展处理 */ } }
+    hide(r, '_ext', ext)
+    hide(r, '_bankDisp', bankDisp(r.bankName))
+  }
+  return list
 }
 // 开户银行按生产口径显示「联行号-名称」（花名册库里仍只存名称，导入/编辑不受影响）
 function bankDisp(name) {
@@ -389,9 +419,13 @@ async function reload() {
   loading.value = true
   try {
     const res = await rosterEditApi.page({ batchId: batchId.value, ...filterParams(), pageNum: page.pageNum, pageSize: page.pageSize })
-    rows.value = res?.records || []
+    const list = res?.records || []
+    // 先补齐联行号缓存再一次性算好派生列，然后整体赋值：
+    // 表格只 patch 一次，且渲染期不再触碰 reactive 的 bankCache（原先 merge 新银行名会引发整表重渲染）
+    await resolveRowBanks(list)
+    decorate(list)
+    rows.value = list
     page.total = Number(res?.total) || 0
-    resolveRowBanks(rows.value)
   } finally { loading.value = false }
 }
 function filterParams() {
@@ -449,6 +483,8 @@ const fillVisible = ref(false); const filling = ref(false); const fillLoading = 
 const fillExpanded = ref(false)
 const fill = reactive({ source: '1', villageId: null, beneficiaryName: '', bulkAmount: null, payeeMode: 'HOUSEHOLD' })
 const candidates = ref([]); const candSelected = ref([]); const candTable = ref(null)
+// 到户模式下被整户跳过的统计（户主本人无档案），>0 时弹窗内提示先补录户主
+const fillSkip = reactive({ households: 0, people: 0 })
 // 行唯一键：+/- 增删行与选择保留（reserve-selection）都靠它，别用 index（增删后错位）
 let fillKeySeq = 0
 const blankFillRow = () => ({
@@ -463,6 +499,7 @@ function clearCandSel() { candTable.value?.clearSelection(); candSelected.value 
 function openFill() {
   if (!needBatch()) return
   candidates.value = []; clearCandSel()
+  fillSkip.households = 0; fillSkip.people = 0
   fill.villageId = null; fill.beneficiaryName = ''; fill.bulkAmount = null; fillExpanded.value = false
   fillVisible.value = true
 }
@@ -470,14 +507,17 @@ async function fillQuery() {
   fillLoading.value = true
   try {
     // 带 batchId：后端剔除已在本批次的人员（同批次人员不可重复，二次填报搜不到已加的人）
-    const list = await rosterEditApi.fillCandidates({
+    const res = await rosterEditApi.fillCandidates({
       batchId: batchId.value,
       source: fill.source,
       villageId: fill.villageId || undefined,
       beneficiaryName: fill.beneficiaryName || undefined,
       payeeMode: fill.payeeMode
     })
-    candidates.value = (list || []).map(r => ({ ...blankFillRow(), ...r, _k: ++fillKeySeq, standard: 0, amount: 0 }))
+    // 返回体是 {rows, skippedHouseholds, skippedPeople}（到户缺户主档案的整户被剔除，见后端 fillCandidates）
+    fillSkip.households = res?.skippedHouseholds || 0
+    fillSkip.people = res?.skippedPeople || 0
+    candidates.value = (res?.rows || []).map(r => ({ ...blankFillRow(), ...r, _k: ++fillKeySeq, standard: 0, amount: 0 }))
     // 换了候选数据：清掉上次查询残留在保留集里的旧勾选，否则会跨查询叠加
     await nextTick(); clearCandSel()
   } finally { fillLoading.value = false }
@@ -491,6 +531,11 @@ function applyBulkAmount() {
 function addFillRow(index) { candidates.value.splice(index + 1, 0, blankFillRow()) }
 async function delFillRow(index) {
   await ElMessageBox.confirm('是否删除当前行？', '请选择', { type: 'warning' })
+  const row = candidates.value[index]
+  // reserve-selection 刻意保留「已不在 data 里」的勾选行，只 splice 的话被删的人仍在 candSelected 里，
+  // 保存时照样写进批次。必须同时摘掉表格勾选和本地选中数组。
+  candTable.value?.toggleRowSelection(row, false)
+  candSelected.value = candSelected.value.filter(r => r._k !== row._k)
   candidates.value.splice(index, 1)
 }
 async function doFillSave() {
@@ -526,7 +571,9 @@ async function doSubmit() {
     showLog(res.errors || [])
     return
   }
-  ElMessage.success('已送审'); refreshBatches()
+  // 被退回过的清册「原岗续审」，直接回退回岗——把目标岗回显出来，否则乡镇经办不知道送到哪了
+  ElMessage.success(res?.stageLabel ? `已送审，待【${res.stageLabel}】审核` : '已送审')
+  refreshBatches()
 }
 async function doUnsubmit() { if (!needBatch()) return; await rosterEditApi.unsubmit(batchId.value); ElMessage.success('已取消送审'); refreshBatches() }
 async function doStop() {
@@ -624,6 +671,7 @@ function money(v) { return v == null ? '' : Number(v).toLocaleString('zh-CN', { 
 .filter :deep(.el-card__body) { padding: 16px; }
 .search-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px 24px; }
 .sf { display: flex; align-items: center; }
+.fill-skip-tip { margin-bottom: 10px; }
 .sf > label { width: 110px; text-align: right; color: #606266; flex: none; }
 .sf .el-input, .sf .el-select { flex: 1; }
 .sf.actions { justify-content: flex-start; gap: 8px; }

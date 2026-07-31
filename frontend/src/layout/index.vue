@@ -234,7 +234,9 @@ async function onPwdSubmit() {
 .app-body { flex: 1; overflow: hidden; }
 
 /* 左侧：暖白底完整菜单树 */
-.app-aside { background: var(--card); border-right: 1px solid var(--line); overflow-y: auto; }
+/* overflow-x 必须显式 hidden：只写 overflow-y:auto 时规范会把 overflow-x:visible 强制算成 auto，
+   长菜单名（如「20821-特困人员救助供养」）撑破 236px 就冒出一条没用的横向滚动条 */
+.app-aside { background: var(--card); border-right: 1px solid var(--line); overflow-y: auto; overflow-x: hidden; }
 .side-menu { border-right: none !important; background: transparent; padding: 8px; }
 .side-menu :deep(.el-menu-item), .side-menu :deep(.el-sub-menu__title) {
   height: 44px; border-radius: 8px; margin-bottom: 2px; color: var(--sub); font-size: 14px;
