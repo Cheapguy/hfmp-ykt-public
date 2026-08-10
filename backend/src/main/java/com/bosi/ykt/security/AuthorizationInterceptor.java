@@ -80,6 +80,19 @@ public class AuthorizationInterceptor implements HandlerInterceptor {
             Map.entry("/pay/apply",         new Rule(502, true))
     );
 
+    /**
+     * 方法级覆盖：同一控制器里分属不同菜单的端点，键 = 控制器基路径 + "#" + 方法名，优先于控制器级规则。
+     *
+     * <p>补贴项目的审核链端点和维护端点同住 {@code /dept/project} 控制器，但分属两个菜单：
+     * 维护(301) 归县财政录入岗，审核(312) 归省财政厅业务处室/农业处。若都按控制器级的 301 判，
+     * 省厅两岗就得拿到「补贴项目维护」菜单才能审核——那等于顺带给了他们新增/删除县项目的入口。
+     */
+    private static final Map<String, Rule> METHOD_RULES = Map.of(
+            "/dept/project#approve",   new Rule(312, true),
+            "/dept/project#reject",    new Rule(312, true),
+            "/dept/project#traceCode", new Rule(312, true)
+    );
+
     /** 已登记的控制器基路径（供启动自检 {@link AuthCoverageCheck} 核对覆盖面）。 */
     static Set<String> ruleBasePaths() {
         return RULES.keySet();
@@ -98,7 +111,9 @@ public class AuthorizationInterceptor implements HandlerInterceptor {
         String ut = u == null ? null : u.getUserType();
         if ("SYS_ADMIN".equals(ut)) return true;
 
-        Rule rule = RULES.get(controllerBasePath(hm));
+        String base = controllerBasePath(hm);
+        Rule rule = METHOD_RULES.get(base + "#" + hm.getMethod().getName());
+        if (rule == null) rule = RULES.get(base);
         if (rule == null) return true;
 
         boolean isWrite = !("GET".equalsIgnoreCase(req.getMethod()) || "HEAD".equalsIgnoreCase(req.getMethod()));

@@ -14,13 +14,16 @@
         </el-form-item></el-col>
 
         <el-col :span="8"><el-form-item label="主管部门" prop="competentDept">
-          <el-select v-model="form.competentDept" filterable allow-create default-first-option style="width:100%">
-            <el-option v-for="o in COMPETENT_DEPTS" :key="o" :label="o" :value="o" />
+          <el-select v-model="form.competentDept" filterable allow-create default-first-option
+            style="width:100%" :loading="loadingDict" placeholder="请选择">
+            <el-option v-for="o in agencies" :key="o.guid" :label="o.code ? `${o.code}-${o.name}` : o.name"
+              :value="o.name" />
           </el-select>
         </el-form-item></el-col>
         <el-col :span="8"><el-form-item label="业务处室" prop="deptName">
-          <el-select v-model="form.deptName" filterable allow-create default-first-option style="width:100%">
-            <el-option v-for="o in BIZ_DEPTS" :key="o" :label="o" :value="o" />
+          <el-select v-model="form.deptName" filterable style="width:100%" :loading="loadingDict" placeholder="请选择">
+            <el-option v-for="o in bizOffices" :key="o.officeCode"
+              :label="`${o.officeCode}-${o.officeName}`" :value="o.officeName" />
           </el-select>
         </el-form-item></el-col>
         <el-col :span="8"><el-form-item label="发放类型" prop="grantType">
@@ -41,13 +44,19 @@
           </el-select>
         </el-form-item></el-col>
         <el-col :span="8"><el-form-item label="预算来源" prop="budgetSource">
-          <el-select v-model="form.budgetSource" filterable allow-create default-first-option clearable style="width:100%">
-            <el-option v-for="o in BUDGET_SOURCES" :key="o" :label="o" :value="o" />
+          <el-select v-model="form.budgetSource" clearable style="width:100%" placeholder="请选择">
+            <el-option v-for="o in BUDGET_SOURCES" :key="o.code" :label="`${o.code}-${o.name}`" :value="o.name" />
           </el-select>
         </el-form-item></el-col>
 
         <el-col :span="8"><el-form-item label="追踪代码" prop="traceCode">
-          <el-input v-model="form.traceCode" disabled placeholder="由省财政厅信息处终审后核定" />
+          <el-input v-model="form.traceCode" disabled placeholder="由省财政厅农业处终审时核定" />
+        </el-form-item></el-col>
+        <el-col :span="8"><el-form-item label="联系人" prop="contactName">
+          <el-input v-model="form.contactName" maxlength="30" />
+        </el-form-item></el-col>
+        <el-col :span="8"><el-form-item label="联系方式" prop="contactPhone">
+          <el-input v-model="form.contactPhone" maxlength="30" />
         </el-form-item></el-col>
 
         <el-col :span="24"><el-form-item label="补贴范围及对象" prop="subsidyScope">
@@ -59,20 +68,54 @@
         <el-col :span="24"><el-form-item label="政策文号" prop="policyDocNo">
           <el-input v-model="form.policyDocNo" maxlength="100" />
         </el-form-item></el-col>
-        <el-col :span="24"><el-form-item label="政策文件" prop="policyFile">
-          <div class="policy-file">
-            <template v-if="form.policyFile">
-              <a v-if="policyFileUrl" :href="policyFileUrl" target="_blank" class="file-link">{{ policyFileName }}</a>
-              <span v-else class="file-plain">{{ form.policyFile }}</span>
-              <el-button link type="danger" @click="form.policyFile = ''">移除</el-button>
-            </template>
-            <el-upload :show-file-list="false" :auto-upload="false" :on-change="onPolicyFilePick"
-                       accept=".pdf,.doc,.docx,.wps,.png,.jpg,.jpeg,.ofd">
-              <el-button :loading="uploadingFile">{{ form.policyFile ? '重新上传' : '上传附件' }}</el-button>
-            </el-upload>
+
+        <el-col :span="24"><el-form-item label="政策文件" prop="files">
+          <div class="file-panel">
+            <div class="file-head">
+              <span class="file-head-label">政策文件</span>
+              <span class="tip">本系统为非涉密平台、严禁传输国家秘密，请确保扫描、上传的文件资料不涉及国家秘密</span>
+              <el-upload class="up-new" :show-file-list="false" :auto-upload="false"
+                         :on-change="f => onPick(f, -1)" :accept="ACCEPT">
+                <el-button size="small" :loading="uploading">上传新附件</el-button>
+              </el-upload>
+            </div>
+            <el-table :data="form.files" border size="small" empty-text="暂无附件">
+              <el-table-column type="index" label="序号" width="60" align="center" />
+              <el-table-column prop="fileName" label="文件名称" min-width="240" show-overflow-tooltip />
+              <el-table-column label="文件大小" width="110" align="right">
+                <template #default="{ row }">{{ sizeText(row.fileSize) }}</template>
+              </el-table-column>
+              <el-table-column prop="uploadName" label="上传人" width="100" align="center">
+                <template #default="{ row }">{{ row.uploadName || '—' }}</template>
+              </el-table-column>
+              <el-table-column label="下载" width="70" align="center">
+                <template #default="{ row }">
+                  <el-button link type="success" :icon="Download" title="下载" @click="doDownload(row)" />
+                </template>
+              </el-table-column>
+              <el-table-column label="重新上传" width="90" align="center">
+                <template #default="{ $index }">
+                  <el-upload :show-file-list="false" :auto-upload="false"
+                             :on-change="f => onPick(f, $index)" :accept="ACCEPT">
+                    <el-button link type="warning" :icon="Upload" title="重新上传" />
+                  </el-upload>
+                </template>
+              </el-table-column>
+              <el-table-column label="预览" width="70" align="center">
+                <template #default="{ row }">
+                  <el-button link type="primary" :icon="View" title="预览"
+                    :disabled="!previewable(row)" @click="doPreview(row)" />
+                </template>
+              </el-table-column>
+              <el-table-column label="删除" width="70" align="center">
+                <template #default="{ $index }">
+                  <el-button link type="danger" :icon="CircleClose" title="删除" @click="doRemove($index)" />
+                </template>
+              </el-table-column>
+            </el-table>
           </div>
-          <div class="tip">本系统为非涉密平台，严禁传输国家秘密，请确保扫描、上传的文件资料不涉及国家秘密</div>
         </el-form-item></el-col>
+
         <el-col :span="24"><el-form-item label="补贴标准" prop="subsidyStandard">
           <el-input v-model="form.subsidyStandard" type="textarea" :rows="2" maxlength="600" show-word-limit />
         </el-form-item></el-col>
@@ -87,8 +130,9 @@
 
 <script setup>
 import { ref, reactive, computed, watch } from 'vue'
-import { ElMessage } from 'element-plus'
-import { projectApi } from '../../api/system'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Download, Upload, View, CircleClose } from '@element-plus/icons-vue'
+import { projectApi, agencyApi } from '../../api/system'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
@@ -96,7 +140,7 @@ const props = defineProps({
 })
 const emit = defineEmits(['update:visible', 'saved'])
 
-const POLICY = { CENTRAL: '中央级', PROVINCE: '省级', CITY: '市级', COUNTY: '县级' }
+const POLICY = { CENTRAL: '中央级', PROVINCE: '省级', CITY: '市级', COUNTY: '县（区）级' }
 const PROJLEVEL = { PROV_SELF: '省级自建项目', PROV_CATALOG: '省级目录清单项目', CITY_SELF: '市级自建项目', COUNTY_SELF: '县级自建项目' }
 // 区划联动：政策级次 -> 可选项目级次
 const LEVEL_MAP = {
@@ -105,10 +149,14 @@ const LEVEL_MAP = {
   PROVINCE: ['PROV_SELF', 'PROV_CATALOG'],
   CENTRAL: ['PROV_SELF', 'PROV_CATALOG']
 }
-const GRANT_TYPES = ['一卡通发放', '社会化发放', '现金发放']
-const BUDGET_SOURCES = ['中央财政', '省级财政', '市级财政', '县级财政']
-const COMPETENT_DEPTS = ['财政局', '农业农村局', '人力资源和社会保障局', '民政局', '林业和草原局', '教育局']
-const BIZ_DEPTS = ['农业农村处', '社会保障处', '综合处', '社会救助科', '教育科', '林业站']
+// 发放类型对齐生产：只有到户/到人两种。原先那三项（一卡通发放/社会化发放/现金发放）
+// 是脚手架阶段的臆造值，与批量填报的收款人绑定口径(HOUSEHOLD/PERSON)也对不上。
+const GRANT_TYPES = ['到户', '到人']
+// 预算来源对齐生产：只有本级财力一条
+const BUDGET_SOURCES = [{ code: '001', name: '本级财力' }]
+const ACCEPT = '.pdf,.doc,.docx,.wps,.xls,.xlsx,.png,.jpg,.jpeg,.ofd'
+// 浏览器能直接开的才给预览，其余（doc/xls 等）只能下载——生产也是这几类没有预览按钮
+const PREVIEWABLE = /\.(pdf|png|jpg|jpeg)$/i
 
 const formRef = ref()
 const saving = ref(false)
@@ -118,41 +166,136 @@ const blank = () => ({
   id: null, projectCode: '', projectName: '', shortName: '',
   competentDept: '', deptName: '', grantType: '',
   policyLevel: '', projectLevel: '', budgetSource: '', traceCode: '',
-  subsidyScope: '', policyDocName: '', policyDocNo: '', policyFile: '', subsidyStandard: ''
+  contactName: '', contactPhone: '',
+  subsidyScope: '', policyDocName: '', policyDocNo: '', subsidyStandard: '',
+  files: []
 })
 const form = reactive(blank())
 
 const projectLevelOptions = computed(() => LEVEL_MAP[form.policyLevel] || [])
-function onPolicyChange() {
+
+// ===== 字典：主管部门(机构) / 业务处室 / 本账号可选的政策级次 =====
+const agencies = ref([])
+const bizOffices = ref([])
+const loadingDict = ref(false)
+// 受限账号（市级）只能选市级；判据在后端（依赖 SYS_ORG.ORG_TYPE），前端只拿结果用于即时弹提示
+const allowedLevels = ref(null)
+const lockedMsg = ref('')
+let dictLoaded = false
+
+async function loadDict() {
+  if (dictLoaded) return
+  loadingDict.value = true
+  try {
+    const [ag, bo, pl] = await Promise.all([
+      agencyApi.list({ level: 2 }),
+      projectApi.bizOffices(),
+      projectApi.policyLevels()
+    ])
+    agencies.value = ag || []
+    bizOffices.value = bo || []
+    allowedLevels.value = pl?.allowed || null
+    lockedMsg.value = pl?.lockedMsg || ''
+    dictLoaded = true
+  } finally { loadingDict.value = false }
+}
+
+/**
+ * 政策级次越界即弹提示并回退到上一个合法值。
+ *
+ * <p>不清空：清空会立刻触发「请选择政策级次」「请选择项目级次」两行必填校验红字，
+ * 用户还没提交就看见一片红。受限账号本来就只有一个合法值，回退等于什么都没发生。
+ */
+let lastValidLevel = ''
+// 打开修改弹窗时该项目是否本来就有附件——决定「政策文件必填」对它是否成立，见 rules.files
+let hadFilesOnOpen = false
+function onPolicyChange(v) {
+  if (allowedLevels.value && v && !allowedLevels.value.includes(v)) {
+    form.policyLevel = lastValidLevel
+    if (!projectLevelOptions.value.includes(form.projectLevel)) form.projectLevel = ''
+    ElMessageBox.alert(lockedMsg.value || '当前账号不能选择该政策级次', '提示', { confirmButtonText: '确定' })
+    return
+  }
+  lastValidLevel = v || ''
   // 政策级次变化后，项目级次若不在允许集合则清空
   if (!projectLevelOptions.value.includes(form.projectLevel)) form.projectLevel = ''
 }
 
-// ===== 政策文件附件：policyFile 存 /files/preview 下载地址；旧数据可能是纯文本文件名 =====
-const uploadingFile = ref(false)
-const policyFileUrl = computed(() =>
-  form.policyFile && form.policyFile.startsWith('/hfmp-ykt/api/files/preview/') ? form.policyFile : '')
-const policyFileName = computed(() => {
-  const m = /[?&]fn=([^&]+)/.exec(form.policyFile || '')
-  try { return m ? decodeURIComponent(m[1]) : '政策文件附件' } catch { return '政策文件附件' }
-})
-async function onPolicyFilePick(file) {
+/** 主管部门默认值：优先农业口（生产默认「农业科」，本地机构字典里叫「农业股」/「农业农村局」）。 */
+function defaultCompetentDept() {
+  const hit = agencies.value.find(a => /农业/.test(a.name || ''))
+  return hit ? hit.name : ''
+}
+
+// ===== 政策文件附件 =====
+const uploading = ref(false)
+
+/** idx < 0 = 追加新附件；idx >= 0 = 替换该行（重新上传，保留首传者与原序号）。 */
+async function onPick(file, idx) {
   if (!file || !file.raw) return
   if (file.raw.size > 20 * 1024 * 1024) return ElMessage.warning('附件不能超过 20MB')
   const fd = new FormData()
   fd.append('file', file.raw)
-  uploadingFile.value = true
+  uploading.value = true
   try {
     const d = await projectApi.upload(fd)
-    form.policyFile = d.url
-    ElMessage.success('附件上传成功')
-  } finally { uploadingFile.value = false }
+    const row = {
+      fileName: d.fileName, fileSize: d.fileSize, fileUrl: d.url, uploadName: d.uploadName
+    }
+    if (idx >= 0) {
+      // 重新上传：换文件，但「上传人」沿用原行——这一列记的是谁把这份材料带进来的
+      const old = form.files[idx]
+      form.files[idx] = { ...row, uploadBy: old.uploadBy, uploadName: old.uploadName || d.uploadName }
+      ElMessage.success('已重新上传')
+    } else {
+      form.files.push(row)
+      ElMessage.success('附件上传成功')
+    }
+  } finally { uploading.value = false }
 }
 
-watch(() => props.visible, v => {
+async function doRemove(idx) {
+  const f = form.files[idx]
+  await ElMessageBox.confirm(`确定删除附件「${f.fileName}」？保存后生效`, '删除确认', { type: 'warning' })
+  form.files.splice(idx, 1)
+}
+
+function doDownload(row) { window.open(row.fileUrl, '_blank') }
+function previewable(row) { return PREVIEWABLE.test(row.fileName || '') }
+function doPreview(row) { window.open(row.fileUrl, '_blank') }
+
+function sizeText(n) {
+  const v = Number(n)
+  if (!v || v <= 0) return '—'
+  if (v < 1024) return v + ' B'
+  if (v < 1024 * 1024) return (v / 1024).toFixed(2) + ' KB'
+  return (v / 1024 / 1024).toFixed(2) + ' MB'
+}
+
+watch(() => props.visible, async v => {
   if (!v) return
   Object.assign(form, blank())
-  if (props.row) Object.assign(form, JSON.parse(JSON.stringify(props.row)))
+  // 先把行数据铺上再拉字典：字典任何一个接口挂了都会让 watch 抛出，
+  // 放在 await 之后的赋值就整段不执行——修改弹窗会开成一片空白，像这条记录没数据一样。
+  if (props.row) {
+    Object.assign(form, JSON.parse(JSON.stringify(props.row)))
+    form.files = []
+  }
+  await loadDict()
+  if (props.row) {
+    if (props.row.id) form.files = (await projectApi.files(props.row.id)) || []
+    hadFilesOnOpen = form.files.length > 0
+    lastValidLevel = form.policyLevel || ''
+  } else {
+    form.competentDept = defaultCompetentDept()
+    form.budgetSource = BUDGET_SOURCES[0].name
+    // 只有一个可选级次（市级账号）时直接预选，省一次必然的点击
+    if (allowedLevels.value?.length === 1) {
+      form.policyLevel = allowedLevels.value[0]
+      if (projectLevelOptions.value.length === 1) form.projectLevel = projectLevelOptions.value[0]
+    }
+    lastValidLevel = form.policyLevel || ''
+  }
 })
 
 const required = (msg) => ({ required: true, message: msg, trigger: 'change' })
@@ -167,7 +310,19 @@ const rules = {
   subsidyScope: [{ required: true, message: '请输入补贴范围及对象', trigger: 'blur' }],
   policyDocName: [{ required: true, message: '请输入政策文件名称', trigger: 'blur' }],
   policyDocNo: [{ required: true, message: '请输入政策文号', trigger: 'blur' }],
-  subsidyStandard: [{ required: true, message: '请输入补贴标准', trigger: 'blur' }]
+  subsidyStandard: [{ required: true, message: '请输入补贴标准', trigger: 'blur' }],
+  // required:true 不只是校验，还负责让 label 显示红星——只写 validator 的话校验拦得住但标签上没星，
+  // 用户看不出这是必填项（生产表单上「政策文件」是带红星的）。
+  //
+  // 例外：打开时本来就没有附件的历史项目不强制。导入的 1092 条生产项目全部没有附件行，
+  // 一律强制的话这些项目改个联系人都保存不了，而附件原件并不在我们手上。
+  // 新增项目、以及本来有附件却被删光的，仍然拦。
+  files: [{
+    required: true,
+    validator: (_r, _v, cb) =>
+      (form.files.length || (editing.value && !hadFilesOnOpen)) ? cb() : cb(new Error('请上传政策文件')),
+    trigger: 'change'
+  }]
 }
 
 async function onSave() {
@@ -185,9 +340,13 @@ function onClosed() { formRef.value?.clearValidate?.() }
 
 <style scoped>
 .proj-form :deep(.el-form-item) { margin-bottom: 16px; }
-.tip { color: #f56c6c; font-size: 12px; line-height: 1.5; margin-top: 4px; }
-.policy-file { display: flex; align-items: center; gap: 12px; }
-.policy-file .file-link { color: var(--el-color-primary); text-decoration: none; }
-.policy-file .file-link:hover { text-decoration: underline; }
-.policy-file .file-plain { color: var(--el-text-color-regular); }
+.tip { color: #f56c6c; font-size: 12px; line-height: 1.5; }
+.file-panel { width: 100%; border: 1px solid var(--el-border-color-lighter); }
+.file-head {
+  display: flex; align-items: center; gap: 12px;
+  padding: 6px 10px; background: var(--el-fill-color-light);
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+.file-head-label { font-weight: 600; white-space: nowrap; }
+.file-head .up-new { margin-left: auto; }
 </style>

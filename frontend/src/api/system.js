@@ -65,10 +65,14 @@ export const referReqApi = {
 export const projectApi = {
   ...makeCrud('/dept/project'),
   submit:  (ids, opinion) => request.post('/dept/project/submit', { ids, opinion }),
-  approve: (ids, opinion, officeCode, officeName) => request.post('/dept/project/approve', { ids, opinion, officeCode, officeName }),
+  // traceCode 只在农业处终审那一棒生效，其余棒传了也会被后端忽略
+  approve: (ids, opinion, traceCode) => request.post('/dept/project/approve', { ids, opinion, traceCode }),
   reject:  (ids, opinion) => request.post('/dept/project/reject', { ids, opinion }),
   traceCode: (ids, traceCode, opinion) => request.post('/dept/project/trace-code', { ids, traceCode, opinion }),
   offices: () => request.get('/dept/project/offices'),
+  bizOffices: () => request.get('/dept/project/biz-offices'),
+  policyLevels: () => request.get('/dept/project/policy-levels'),
+  files:   (id) => request.get(`/dept/project/${id}/files`),
   upload:  (formData) => request.post('/dept/project/upload', formData, { headers: { 'Content-Type': 'multipart/form-data' } }),
   history: (id) => request.get(`/dept/project/${id}/history`),
   revoke:  (id) => request.post(`/dept/project/${id}/revoke`),

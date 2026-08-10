@@ -26,25 +26,24 @@
       <!-- 本省项目（本省 / 本级及管辖区划） -->
       <template v-if="tab === 'gansu'">
         <el-table v-loading="loading" :data="rows" border stripe size="default">
+          <!-- 列序对齐生产：编码 / 名称(可点开详情) / 追踪代码 / 追踪名称 / 主管部门 / 业务科室 /
+               发放类型 / 是否自建项目 -->
           <el-table-column type="index" label="序号" width="60" align="center" />
-          <el-table-column prop="projectCode" label="项目编码" width="160" />
-          <el-table-column prop="projectName" label="项目名称" min-width="200" show-overflow-tooltip />
-          <el-table-column prop="competentDept" label="主管部门" width="160" show-overflow-tooltip />
-          <el-table-column prop="deptName" label="业务科室" width="140" show-overflow-tooltip />
-          <el-table-column prop="grantType" label="发放类型" width="110" align="center" />
-          <el-table-column prop="policyLevel" label="政策级次" width="100" align="center">
-            <template #default="{ row }">{{ POLICY[row.policyLevel] || row.policyLevel }}</template>
-          </el-table-column>
-          <el-table-column prop="projectLevel" label="项目级次" width="150" align="center">
-            <template #default="{ row }">{{ PROJLEVEL[row.projectLevel] || row.projectLevel }}</template>
-          </el-table-column>
-          <el-table-column label="状态" width="100" align="center">
+          <el-table-column prop="projectCode" label="项目编码" width="130" />
+          <el-table-column prop="projectName" label="项目名称" min-width="220" show-overflow-tooltip>
             <template #default="{ row }">
-              <el-tag :type="STATUS_TYPE[row.auditStatus] || 'info'">{{ row.lastResult || STATUS_LABEL[row.auditStatus] || row.auditStatus }}</el-tag>
+              <el-button link type="primary" class="name-link" @click="openDetail(row)">{{ row.projectName }}</el-button>
             </template>
           </el-table-column>
-          <el-table-column label="是否纳入" width="90" align="center">
-            <template #default="{ row }">{{ row.included === 1 ? '是' : '否' }}</template>
+          <el-table-column prop="traceCode" label="项目追踪代码" width="150" align="center">
+            <template #default="{ row }">{{ row.traceCode || '' }}</template>
+          </el-table-column>
+          <el-table-column prop="trackProName" label="项目追踪名称" width="180" show-overflow-tooltip />
+          <el-table-column prop="competentDept" label="主管部门" width="160" show-overflow-tooltip />
+          <el-table-column prop="deptName" label="业务科室" width="140" show-overflow-tooltip />
+          <el-table-column prop="grantType" label="发放类型" width="100" align="center" />
+          <el-table-column prop="isSelfBuilt" label="是否自建项目" width="110" align="center">
+            <template #default="{ row }">{{ row.isSelfBuilt || '' }}</template>
           </el-table-column>
         </el-table>
         <div class="pager">
@@ -57,33 +56,35 @@
       <!-- 中央项目（全国统一清单） -->
       <template v-else>
         <el-table v-loading="loading" :data="ctlRows" border stripe size="default">
+          <!-- 列序对齐生产：编码 / 名称 / 中央主管部门名称 / 项目类型，政策依据是本系统多给的一列 -->
           <el-table-column type="index" label="序号" width="60" align="center" />
-          <el-table-column prop="projectCode" label="中央项目编码" width="120" align="center" />
-          <el-table-column prop="projectName" label="中央项目名称" min-width="220" show-overflow-tooltip />
-          <el-table-column prop="category" label="分类" width="110" align="center">
+          <el-table-column prop="projectCode" label="项目编码" width="100" align="center" />
+          <el-table-column prop="projectName" label="项目名称" min-width="240" show-overflow-tooltip />
+          <el-table-column prop="competentDept" label="中央主管部门名称" width="220" show-overflow-tooltip />
+          <el-table-column prop="category" label="项目类型" width="110" align="center">
             <template #default="{ row }">
               <el-tag :type="row.category === '必纳项目' ? 'danger' : 'warning'">{{ row.category }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column prop="competentDept" label="主管部门" width="180" show-overflow-tooltip />
-          <el-table-column prop="policyBasis" label="政策依据" min-width="240" show-overflow-tooltip />
+          <el-table-column prop="policyBasis" label="政策依据" min-width="260" show-overflow-tooltip />
         </el-table>
         <el-empty v-if="!ctlRows.length && !loading" description="暂无数据" />
       </template>
     </el-card>
+
+    <!-- 点项目名称打开的只读详情 -->
+    <ProjectDetail v-model:visible="detailVisible" :row="detailRow" />
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
 import { projectApi } from '../../api/system'
-
-const POLICY = { CENTRAL: '中央级', PROVINCE: '省级', CITY: '市级', COUNTY: '县级' }
-const PROJLEVEL = { PROV_SELF: '省级自建项目', PROV_CATALOG: '省级目录清单项目', CITY_SELF: '市级自建项目', COUNTY_SELF: '县级自建项目' }
-const STATUS_LABEL = { DRAFT: '草稿', SUBMITTED: '已送审', APPROVED: '已终审' }
-const STATUS_TYPE = { DRAFT: 'info', SUBMITTED: 'warning', APPROVED: 'success' }
+import ProjectDetail from './ProjectDetail.vue'
 
 const tab = ref('gansu')
+const detailVisible = ref(false); const detailRow = ref(null)
+function openDetail(row) { detailRow.value = row; detailVisible.value = true }
 const query = reactive({ projectCode: '', projectName: '' })
 const rows = ref([]); const ctlRows = ref([]); const loading = ref(false)
 const page = reactive({ pageNum: 1, pageSize: 10, total: 0 })
@@ -115,4 +116,7 @@ async function reload() {
 .filter { margin-bottom: 12px; }
 .filter :deep(.el-card__body) { padding: 16px 16px 0; }
 .pager { display: flex; justify-content: flex-end; margin-top: 12px; }
+/* 项目名称做成链接样式（生产是带下划线的蓝字），但保持单行省略不撑破列宽 */
+.name-link { max-width: 100%; text-decoration: underline; }
+.name-link :deep(span) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>

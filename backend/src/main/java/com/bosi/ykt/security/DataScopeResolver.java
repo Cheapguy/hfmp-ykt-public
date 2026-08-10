@@ -56,13 +56,27 @@ public class DataScopeResolver {
         public final Long ownTownId;           // 本机构(乡镇) id
         public final List<Long> countyTownIds; // 本县所有乡镇 id（COUNTY 用）
         public final boolean denied;           // 最窄拒止态（token 有效但用户已删/无机构）：应看不到任何业务数据
+        /**
+         * 州（市）级范围：本州所有县 + 州本级，但不含外州。
+         *
+         * <p>没有做成 Scope 的第四个枚举值，是因为 Scope 被 10 处 {@code == Scope.ALL} 判断引用，
+         * 加枚举值要逐处决定归属，漏一处就是越权或误锁。州级在乡镇/批次/花名册这些维度上
+         * 本来就等于全域（本系统只服务某某州一个州），唯独项目库导入了全省数据才需要区分，
+         * 所以做成 ALL 之上的一个附加标记，只在 {@link #applyProject} 生效。
+         */
+        public final boolean stateScoped;
         Ctx(Scope s, String cc, Long own, List<Long> towns) {
-            this(s, cc, own, towns, false);
+            this(s, cc, own, towns, false, false);
         }
         Ctx(Scope s, String cc, Long own, List<Long> towns, boolean denied) {
-            this.scope = s; this.countyCode = cc; this.ownTownId = own; this.countyTownIds = towns; this.denied = denied;
+            this(s, cc, own, towns, denied, false);
+        }
+        Ctx(Scope s, String cc, Long own, List<Long> towns, boolean denied, boolean stateScoped) {
+            this.scope = s; this.countyCode = cc; this.ownTownId = own; this.countyTownIds = towns;
+            this.denied = denied; this.stateScoped = stateScoped;
         }
         static Ctx all() { return new Ctx(Scope.ALL, null, null, null); }
+        static Ctx state() { return new Ctx(Scope.ALL, null, null, null, false, true); }
         /** 最窄拒止：推不出县的非管理员账号——乡镇条件恒空(=-1)，项目走 denied 分支彻底锁死。 */
         static Ctx deny() { return new Ctx(Scope.OWN_ORG, "000000", -1L, null, true); }
     }
@@ -94,7 +108,7 @@ public class DataScopeResolver {
         if ("SYS_ADMIN".equals(u.getUserType())) return Ctx.all();
 
         Scope s = widestScope(uid);
-        if (s == Scope.ALL) return Ctx.all();
+        if (s == Scope.ALL) return stateOnly(uid) ? Ctx.state() : Ctx.all();
 
         SysOrg org = u.getOrgId() == null ? null : orgMapper.selectById(u.getOrgId());
         String cc = (org != null && org.getOrgCode() != null && org.getOrgCode().length() >= 6)
@@ -123,7 +137,25 @@ public class DataScopeResolver {
     private static Scope parse(String v) {
         if ("COUNTY".equals(v)) return Scope.COUNTY;
         if ("OWN_ORG".equals(v)) return Scope.OWN_ORG;
-        return Scope.ALL; // null/未知 → 与列默认一致(ALL)
+        return Scope.ALL; // null/未知/STATE → 与列默认一致(ALL)，STATE 的收窄另由 stateOnly 标记
+    }
+
+    /**
+     * 是否「州级范围」账号：持有 DATA_SCOPE='STATE' 的角色，且没有任何真正全域(ALL)的角色。
+     * 只要另有一个 ALL 角色，就按全域算——多角色一律取最宽，与 {@link #widestScope} 同口径。
+     */
+    private boolean stateOnly(Long uid) {
+        List<Long> roleIds = userRoleMapper.selectList(
+                        new LambdaQueryWrapper<SysUserRole>().eq(SysUserRole::getUserId, uid))
+                .stream().map(SysUserRole::getRoleId).toList();
+        if (roleIds.isEmpty()) return false;
+        boolean anyState = false;
+        for (SysRole r : roleMapper.selectBatchIds(roleIds)) {
+            String ds = r.getDataScope();
+            if ("STATE".equals(ds)) anyState = true;
+            else if (!"COUNTY".equals(ds) && !"OWN_ORG".equals(ds)) return false;   // 真 ALL(含 null)
+        }
+        return anyState;
     }
 
     private List<Long> countyTownIds(String countyCode) {
@@ -133,10 +165,58 @@ public class DataScopeResolver {
                 .stream().map(SysOrg::getId).toList();
     }
 
-    /** 全部县码前缀 '9'+县码（7 位），供项目"非本县且非省级"判定。 */
-    private String ownedCountyPrefixesCsv() {
-        return orgMapper.selectList(new LambdaQueryWrapper<SysOrg>().eq(SysOrg::getOrgType, "COUNTY"))
-                .stream().map(o -> "'9" + o.getOrgCode() + "'").collect(Collectors.joining(","));
+    /**
+     * 「上级公有项目」的编码判据——不依赖行政区划前缀的那两类，两个分支共用：
+     * <ol>
+     *   <li>省级目录清单项目：7 位纯数字且不以 9 开头（国标科目码，如 2080502 高龄津贴），
+     *       由省里下发、全省执行。<b>刻意用正面识别</b>而不是反向的「不是 9 开头就算国标码」：
+     *       外州自建编码并非都以 9 开头，外州某县那条 {@code 9980020004} 就是 6 打头，
+     *       反向判据会把它当成国标码放行，本州账号的项目列表里就会冒出一条外州某县残联的补助。</li>
+     *   <li>{@code '969'} 打头的 12 位编码：YktProjectController.genProjectCode 在
+     *       推不出创建人所属县时（州级账号 / 系统建）用它兜底，其 javadoc 明确定义为「公有编码」。
+     *       漏掉这条的话，这类项目一经生成就落不进任何县前缀、也不是 7 位国标码，
+     *       除 admin 外谁都看不见，连创建人自己都查不到。</li>
+     * </ol>
+     */
+    private static String publicCodeCond(String codeCol) {
+        return "(REGEXP_LIKE(" + codeCol + ", '^[0-8][0-9]{6}$')"
+                + " OR REGEXP_LIKE(" + codeCol + ", '^969[0-9]{9}$'))";
+    }
+
+    /**
+     * 州级可见的编码前缀：本州 8 个县市 + 州本级 + 省本级。
+     * 某某州即 9990001(甲县)、9990002~9990008(乙县…辛县)、9990000(州本级)、9990000(省本级)。
+     */
+    private String stateScopePrefixesCsv() {
+        String counties = orgMapper.selectList(new LambdaQueryWrapper<SysOrg>()
+                        .eq(SysOrg::getOrgType, "COUNTY"))
+                .stream().filter(o -> o.getOrgCode() != null && o.getOrgCode().length() >= 6)
+                .map(o -> "'9" + o.getOrgCode().substring(0, 6) + "'")
+                .distinct().collect(Collectors.joining(","));
+        String publics = publicPrefixesCsv();
+        return counties.isEmpty() ? publics : counties + "," + publics;
+    }
+
+    /**
+     * 本州行政区划码的前 4 位（某某州 990000 → {@code 6229}），用于把「本州所有机构」框出来。
+     * 机构表没配 STATE 行时回落 {@code 0000}，即一个都框不中——宁可少看，不能多看。
+     */
+    private String statePrefix4() {
+        return orgMapper.selectList(new LambdaQueryWrapper<SysOrg>().eq(SysOrg::getOrgType, "STATE"))
+                .stream().map(SysOrg::getOrgCode)
+                .filter(x -> x != null && x.length() >= 4)
+                .findFirst().map(x -> x.substring(0, 4)).orElse("0000");
+    }
+
+    private String publicPrefixesCsv() {
+        List<SysOrg> orgs = orgMapper.selectList(new LambdaQueryWrapper<SysOrg>()
+                .in(SysOrg::getOrgType, List.of("PROV", "STATE")));
+        String csv = orgs.stream()
+                .filter(o -> o.getOrgCode() != null && o.getOrgCode().length() >= 6)
+                .map(o -> "'9" + o.getOrgCode().substring(0, 6) + "'")
+                .distinct().collect(Collectors.joining(","));
+        // 兜底：机构表没配省/州行时至少认省本级，否则 IN () 是语法错误
+        return csv.isEmpty() ? "'9990000'" : csv;
     }
 
     // ============ 过滤注入 ============
@@ -176,11 +256,25 @@ public class DataScopeResolver {
      */
     public void applyProject(AbstractWrapper<?, ?, ?> w, String codeCol) {
         Ctx c = current();
-        if (c.scope == Scope.ALL) return;
         // 已删账号（token 未过期）：不走白名单/县码/在途任何放行分支，彻底锁死。
         // 否则其残留的 SYS_USER_PROJECT 白名单行仍会让已删账号读到被分配项目。
+        // 放在所有放行分支之前：deny 与 stateScoped 目前互斥（见 Ctx 的两个工厂方法），
+        // 但拒止判断的位置不该依赖别处的构造细节。
         if (c.denied) { w.apply("1 = 0"); return; }
         Long uid = UserContext.currentUserId();
+        // 州（市）级：本州 8 县 + 州本级 + 上级公有，外州一概不可见。
+        // 项目库导进来的是全省数据，州财政局只管本州这 9 个前缀，外州某县、外州某市、外州某市那些跟它无关。
+        // 无编码的在途项目同样按创建人所属县收窄，与县级分支一致——否则外州账号（若有）建的草稿
+        // 会被州级账号看见甚至编辑（role 14 复制了 role 3 的菜单，含「补贴项目维护」）。
+        if (c.stateScoped) {
+            w.apply("(SUBSTR(" + codeCol + ",1,7) IN (" + stateScopePrefixesCsv() + ")"
+                    + " OR " + publicCodeCond(codeCol)
+                    + " OR (" + codeCol + " IS NULL AND CREATE_BY IN ("
+                    + "SELECT su.ID FROM SYS_USER su JOIN SYS_ORG so ON so.ID = su.ORG_ID"
+                    + " WHERE SUBSTR(so.ORG_CODE,1,4) = '" + statePrefix4() + "')))");
+            return;
+        }
+        if (c.scope == Scope.ALL) return;
         String inflight = inflightCountyClause(codeCol, c.countyCode, uid);
         if (uid != null && hasAssignedProjects(uid)) {
             // 子查询而非拼 id 列表：授权项目再多也不会踩 ORA-01795（IN 上限 1000）
@@ -188,9 +282,17 @@ public class DataScopeResolver {
                     + inflight + ")");
             return;
         }
-        String owned = ownedCountyPrefixesCsv();
+        // 可见 = 本县自建 OR 上级公有 OR 非自建编码格式（国标目录码等） OR 在途兜底
+        //
+        // 原判据是「前7位不在本州 8 个县的前缀里 = 省级公有」。那是个开口子的写法：
+        // 全省项目库导入后，外州某县(9998003)、外州某县(9998004)、外州某县(9998005) 这些外州县项目的前缀
+        // 同样不在本州 8 县里，于是全被判成省级公有，每个县账号都能看到近 900 条外州项目。
+        // 现改为白名单——公有只认省本级(9990000)与本州本级(9990000)两个前缀，
+        // 其余 '9'+6位数字 一律视为某县自建，只有前缀匹配的那个县看得见。
+        String publics = publicPrefixesCsv();
         w.apply("(" + codeCol + " LIKE '9" + c.countyCode + "%'"
-                + " OR SUBSTR(" + codeCol + ",1,7) NOT IN (" + owned + ")"
+                + " OR SUBSTR(" + codeCol + ",1,7) IN (" + publics + ")"
+                + " OR " + publicCodeCond(codeCol)
                 + inflight + ")");
     }
 

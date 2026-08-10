@@ -1,18 +1,23 @@
 <template>
   <div>
-    <!-- 工具条 -->
-    <el-card shadow="never" class="bar">
-      <template v-if="!forAudit">
+    <!-- 工具条。三个分支写成互斥条件而不是 if/else-if/else：
+         用 v-else 兜底的话，「维护页 + 所有 tab」这一格会掉进审核按钮组里，
+         录入岗就凭空多出「审核/退回/核定追踪代码」三个按钮。
+         维护页各 tab：待审核=还没送出去能增删改送；已审核=已送出去只能撤回；所有=纯查看，整条工具栏收起。 -->
+    <el-card v-if="showBar" shadow="never" class="bar">
+      <template v-if="forAudit">
+        <el-button type="primary" :icon="Select" @click="doApprove">审核</el-button>
+        <el-button :icon="Back" @click="doReject">退回</el-button>
+        <el-button :icon="Ticket" @click="doTraceCode">核定追踪代码</el-button>
+      </template>
+      <template v-else-if="tab === 'pending'">
         <el-button type="primary" :icon="Plus" @click="openCreate">新增</el-button>
         <el-button :icon="Edit" @click="openEdit">修改</el-button>
         <el-button :icon="Delete" @click="doDelete">删除</el-button>
         <el-button type="success" :icon="Promotion" @click="doSubmit">送审</el-button>
       </template>
-      <template v-else>
-        <el-button type="primary" :icon="Select" @click="doApprove">审核</el-button>
-        <el-button :icon="Back" @click="doReject">退回</el-button>
-        <el-button :icon="Ticket" @click="doTraceCode">核定追踪代码</el-button>
-        <el-button :icon="Edit" @click="openEdit">修改</el-button>
+      <template v-else-if="tab === 'audited'">
+        <el-button :icon="RefreshLeft" @click="doRevoke">取消送审</el-button>
       </template>
     </el-card>
 
@@ -94,25 +99,21 @@
       <el-empty v-if="!history.length" description="暂无审核记录" />
     </el-dialog>
 
-    <!-- 市州综合岗：省级处室信息（选定归口处室） -->
-    <el-dialog v-model="officeVisible" title="省级处室信息 · 选定归口处室" width="560px">
-      <el-table :data="offices" border stripe size="small" height="360"
-        highlight-current-row @current-change="r => officePick = r">
-        <el-table-column width="44" align="center">
-          <template #default="{ row }"><el-radio :model-value="officePick?.officeCode" :label="row.officeCode"><span></span></el-radio></template>
-        </el-table-column>
-        <el-table-column type="index" label="序号" width="60" align="center" />
-        <el-table-column prop="officeCode" label="处室编码" width="100" align="center" />
-        <el-table-column prop="officeName" label="处室名称" min-width="180" />
-      </el-table>
-      <el-form label-width="80px" style="margin-top:12px">
+    <!-- 省财政厅农业处终审：审核意见 + 选填追踪代码（原信息处单独核定那一棒已并入此处） -->
+    <el-dialog v-model="finalVisible" title="省财政厅农业处审核（终审）" width="560px">
+      <el-form label-width="100px">
         <el-form-item label="审核意见">
-          <el-input v-model="officeOpinion" type="textarea" :rows="2" />
+          <el-input v-model="finalOpinion" type="textarea" :rows="2" />
+        </el-form-item>
+        <el-form-item label="追踪代码">
+          <el-input v-model="finalTrace" maxlength="64"
+            placeholder="选填，字母/数字/下划线/连字符；留空可事后用「核定追踪代码」补录" />
         </el-form-item>
       </el-form>
+      <div class="final-tip">终审通过后自动生成项目编码，项目转入「已审核」。</div>
       <template #footer>
-        <el-button @click="officeVisible = false">取消</el-button>
-        <el-button type="primary" @click="confirmOffice">确定</el-button>
+        <el-button @click="finalVisible = false">取消</el-button>
+        <el-button type="primary" @click="confirmFinal">确定终审</el-button>
       </template>
     </el-dialog>
 
@@ -122,20 +123,22 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Edit, Delete, Promotion, Select, Back, Ticket } from '@element-plus/icons-vue'
+import { Plus, Edit, Delete, Promotion, Select, Back, Ticket, RefreshLeft } from '@element-plus/icons-vue'
 import { projectApi } from '../../api/system'
 import ProjectForm from './ProjectForm.vue'
 
 const props = defineProps({ forAudit: { type: Boolean, default: false } })
 
-const POLICY = { CENTRAL: '中央级', PROVINCE: '省级', CITY: '市级', COUNTY: '县级' }
+const POLICY = { CENTRAL: '中央级', PROVINCE: '省级', CITY: '市级', COUNTY: '县（区）级' }
 const PROJLEVEL = { PROV_SELF: '省级自建项目', PROV_CATALOG: '省级目录清单项目', CITY_SELF: '市级自建项目', COUNTY_SELF: '县级自建项目' }
 const STATUS_LABEL = { DRAFT: '草稿', SUBMITTED: '已送审', APPROVED: '已终审' }
 const STATUS_TYPE = { DRAFT: 'info', SUBMITTED: 'warning', APPROVED: 'success' }
 
 const tab = ref('pending')
+// 维护页的「所有」是纯查看页，没有按钮——整条工具栏收起，免得留一条空白卡片
+const showBar = computed(() => props.forAudit || tab.value !== 'all')
 const query = reactive({ projectCode: '', projectName: '' })
 const rows = ref([]); const loading = ref(false)
 const page = reactive({ pageNum: 1, pageSize: 10, total: 0 })
@@ -187,57 +190,69 @@ async function doSubmit() {
   ElMessage.success('送审成功'); reload()
 }
 
-// ---- 审核：5 棒（手册§七(一)3）----
-// COUNTY 县区财政局审核岗 → SZ 市州财政综合岗(选归口处室) → DEPT 省财政厅业务处室
-//   → AGRI 省财政厅农业处(终审+生成编码)
+/**
+ * 取消送审：把已送审的项目撤回成草稿。
+ * 后端只放行「还停在第一棒(省财政厅业务处室)且没人审过」的，已被审过或已终审的会明确报「撤销失败」。
+ * 逐条调用而非批量：接口是单条的，且失败原因要能对上是哪个项目。
+ */
+async function doRevoke() {
+  const r = pickOne(); if (!r) return
+  await ElMessageBox.confirm(`确定取消送审「${r.projectName}」？撤回后回到草稿，可继续修改`, '取消送审',
+    { type: 'warning' })
+  await projectApi.revoke(r.id)
+  ElMessage.success('已取消送审'); reload()
+}
+
+// ---- 审核：3 棒 ----
+// 县财政局录入 --送审--> DEPT 省财政厅业务处室 --> AGRI 省财政厅农业处(终审+生成编码+可核定追踪代码)
+// COUNTY/SZ 是已废弃的中间棒，仅历史在途数据还停在上面，后端按 DEPT 处理，这里跟着给同一个标题。
 const STAGE_TITLE = {
-  COUNTY: '县区财政局审核岗审核',
   DEPT: '省财政厅业务处室审核',
-  AGRI: '省财政厅农业处审核（终审）'
+  AGRI: '省财政厅农业处审核（终审）',
+  COUNTY: '省财政厅业务处室审核',
+  SZ: '省财政厅业务处室审核'
 }
 async function doApprove() {
   if (!ensureSel()) return
   const stages = [...new Set(selected.value.map(r => r.auditStage))]
   if (stages.length > 1) { ElMessage.warning('选中项目处于不同审核阶段，请分别审核'); return }
   const stage = stages[0]
-  if (stage === 'SZ') {
-    // 市州综合岗：须选定归口处室
-    await openOfficeDialog()
-    return
-  }
   const title = STAGE_TITLE[stage]
   if (!title) { ElMessage.warning('当前阶段无法审核'); return }
-  const isFinal = stage === 'AGRI'
-  const { value } = await ElMessageBox.prompt('审核意见', title,
-    { inputValue: '同意', confirmButtonText: isFinal ? '确定终审' : '通过' })
-  await projectApi.approve(selected.value.map(r => r.id), value)
-  ElMessage.success(isFinal ? '终审成功，已生成项目编码' : '审核通过'); reload()
+  if (stage !== 'AGRI') {
+    const { value } = await ElMessageBox.prompt('审核意见', title, { inputValue: '同意', confirmButtonText: '通过' })
+    await projectApi.approve(selected.value.map(r => r.id), value)
+    ElMessage.success('审核通过'); reload()
+    return
+  }
+  // 终审：追踪代码并入这一棒（原先是信息处单独一岗，已退场），留空表示暂不核定，事后可用「核定追踪代码」补
+  finalOpinion.value = '同意'; finalTrace.value = ''; finalVisible.value = true
 }
 
-// ---- 省财政厅信息处：核定追踪代码（对已终审项目）----
+// ---- 农业处终审弹窗（审核意见 + 选填追踪代码）----
+const finalVisible = ref(false); const finalOpinion = ref('同意'); const finalTrace = ref('')
+async function confirmFinal() {
+  const code = finalTrace.value.trim()
+  if (code && !/^[0-9A-Za-z_-]{1,64}$/.test(code)) {
+    ElMessage.warning('追踪代码只能是字母/数字/下划线/连字符，且不超过 64 位'); return
+  }
+  await projectApi.approve(selected.value.map(r => r.id), finalOpinion.value, code || undefined)
+  finalVisible.value = false
+  ElMessage.success(code ? '终审成功，已生成项目编码并核定追踪代码' : '终审成功，已生成项目编码')
+  reload()
+}
+
+// ---- 农业处：事后补录追踪代码（对已终审项目）----
 async function doTraceCode() {
   if (!ensureSel()) return
   if (selected.value.some(r => r.auditStatus !== 'APPROVED')) {
     ElMessage.warning('仅可对已终审项目核定追踪代码'); return
   }
   const { value } = await ElMessageBox.prompt('追踪代码（字母/数字/下划线/连字符，≤64位）', '核定追踪代码',
-    { inputPlaceholder: '省财政厅信息处核定', confirmButtonText: '确定核定',
+    { inputPlaceholder: '终审时未填的可在此补录', confirmButtonText: '确定核定',
       inputPattern: /^[0-9A-Za-z_-]{1,64}$/, inputErrorMessage: '格式不合法' })
   await projectApi.traceCode(selected.value.map(r => r.id), value)
   ElMessage.success('追踪代码已核定'); reload()
-}
-
-// ---- 市州综合岗：选定归口处室 ----
-const officeVisible = ref(false); const offices = ref([]); const officePick = ref(null); const officeOpinion = ref('同意')
-async function openOfficeDialog() {
-  if (!offices.value.length) offices.value = (await projectApi.offices()) || []
-  officePick.value = null; officeOpinion.value = '同意'; officeVisible.value = true
-}
-async function confirmOffice() {
-  if (!officePick.value) { ElMessage.warning('请选择归口处室'); return }
-  await projectApi.approve(selected.value.map(r => r.id), officeOpinion.value,
-    officePick.value.officeCode, officePick.value.officeName)
-  ElMessage.success('审核通过，已转交省财政厅业务处室'); officeVisible.value = false; reload()
 }
 async function doReject() {
   if (!ensureSel()) return
@@ -261,4 +276,5 @@ function fmt(t) { return t ? String(t).replace('T', ' ').slice(0, 19) : '' }
 .filter { margin: 12px 0; }
 .filter :deep(.el-card__body) { padding: 16px 16px 0; }
 .pager { display: flex; justify-content: flex-end; margin-top: 12px; }
+.final-tip { color: var(--el-text-color-secondary); font-size: 12px; padding-left: 100px; }
 </style>
