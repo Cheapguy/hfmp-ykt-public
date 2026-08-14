@@ -84,8 +84,10 @@ Start-Sleep -Seconds 2  # 等 OS 回收端口
 # 1) 后端
 # ============================================================
 Write-Host "[*] 启动后端 Spring Boot ..." -ForegroundColor Cyan
+# dev profile：打开 SQL 明细日志。默认 profile 刻意是「不打 SQL」的安全档
+# （见 application.yml 注释），本地开发要看 SQL 就靠这个参数显式换。
 $bp = Start-Process -FilePath $MavenBin `
-        -ArgumentList 'spring-boot:run' `
+        -ArgumentList 'spring-boot:run','-Dspring-boot.run.profiles=dev' `
         -WorkingDirectory $Backend `
         -RedirectStandardOutput (Join-Path $BackRun 'backend.out') `
         -RedirectStandardError  (Join-Path $BackRun 'backend.err') `

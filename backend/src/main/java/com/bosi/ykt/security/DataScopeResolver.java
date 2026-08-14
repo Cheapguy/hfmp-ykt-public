@@ -185,7 +185,7 @@ public class DataScopeResolver {
 
     /**
      * 州级可见的编码前缀：本州 8 个县市 + 州本级 + 省本级。
-     * 某某州即 9990001(甲县)、9990002~9990008(乙县…辛县)、9990000(州本级)、9990000(省本级)。
+     * 某某州即 9990001(甲县)、9990002~9990008(乙县…辛县)、9990000(州本级)、9900000(省本级)。
      */
     private String stateScopePrefixesCsv() {
         String counties = orgMapper.selectList(new LambdaQueryWrapper<SysOrg>()
@@ -198,7 +198,7 @@ public class DataScopeResolver {
     }
 
     /**
-     * 本州行政区划码的前 4 位（某某州 990000 → {@code 6229}），用于把「本州所有机构」框出来。
+     * 本州行政区划码的前 4 位（某某州 990000 → {@code 9900}），用于把「本州所有机构」框出来。
      * 机构表没配 STATE 行时回落 {@code 0000}，即一个都框不中——宁可少看，不能多看。
      */
     private String statePrefix4() {
@@ -312,6 +312,71 @@ public class DataScopeResolver {
               .append(" WHERE SUBSTR(so.ORG_CODE,1,6) = '").append(countyCode).append("'))");
         }
         return sb.toString();
+    }
+
+    /**
+     * 「属于某个县的用户」子查询：机构挂到县且 orgCode 够 6 位的账号 id 集。
+     * 供 {@link #applyCreatorCounty} 反向识别「公共数据」——不在此集合里的创建人，
+     * 就是推不出县的（系统导入 CREATE_BY 为 NULL、账号已删、机构未配码）。
+     * ID 是主键恒非 NULL，用在 NOT IN 里不会踩「子查询含 NULL 致整表达式为 NULL」的坑。
+     */
+    private static final String COUNTY_USER_IDS =
+            "SELECT su.ID FROM SYS_USER su JOIN SYS_ORG so ON so.ID = su.ORG_ID"
+                    + " WHERE so.ORG_CODE IS NOT NULL AND LENGTH(so.ORG_CODE) >= 6";
+
+    /** 某账号所属县码；推不出（账号不存在/无机构/机构无码）返回 null = 公共数据。 */
+    private String countyOfUser(Long userId) {
+        if (userId == null) return null;
+        SysUser u = userMapper.selectById(userId);
+        if (u == null || u.getOrgId() == null) return null;
+        SysOrg o = orgMapper.selectById(u.getOrgId());
+        return (o != null && o.getOrgCode() != null && o.getOrgCode().length() >= 6)
+                ? o.getOrgCode().substring(0, 6) : null;
+    }
+
+    /**
+     * 按「创建人所属县」过滤——用于既无 TOWN_ID 也无项目编码列的县内数据（政策库 YKT_POLICY、
+     * 通知公告 YKT_NOTICE）。这两张表此前只有 TENANT_ID 隔离，八个县的主管部门账号共用 role 4，
+     * 于是彼此的政策/公告可读可改可删。
+     *
+     * <p>可见 = 本县账号创建 <b>OR</b> 推不出县的公共数据（系统导入的省/州政策、上级下发公告）。
+     * 公共数据放行是刻意的：516 条政策里 514 条是导入的上级政策，各县执行时都要看；
+     * 但写入面 {@link #assertCreatorCounty} 反过来禁止非 ALL 账号动它们——
+     * 读放宽、写收紧的不对称是本方法的设计要点，别为了"对称"把任一边改掉。
+     */
+    public void applyCreatorCounty(AbstractWrapper<?, ?, ?> w, String createByCol) {
+        Ctx c = current();
+        if (c.scope == Scope.ALL) return;
+        if (c.denied) { w.apply("1 = 0"); return; }
+        w.apply("(" + createByCol + " IS NULL"
+                + " OR " + createByCol + " NOT IN (" + COUNTY_USER_IDS + ")"
+                + " OR " + createByCol + " IN (" + COUNTY_USER_IDS
+                + " AND SUBSTR(so.ORG_CODE,1,6) = '" + c.countyCode + "'))");
+    }
+
+    /**
+     * 读取面兜底判定（detail 按 id 直读用，与 {@link #applyCreatorCounty} 同口径）：
+     * 本县自建 OR 公共数据（推不出县）→ 可读。
+     */
+    public boolean creatorCountyReadable(Long createBy) {
+        Ctx c = current();
+        if (c.scope == Scope.ALL) return true;
+        if (c.denied) return false;
+        String cc = countyOfUser(createBy);
+        return cc == null || cc.equals(c.countyCode);
+    }
+
+    /**
+     * 写入面兜底：只能改/删本县账号创建的数据。
+     * 与 {@link #applyCreatorCounty} 的读口径刻意不同——公共数据（创建人推不出县）读得到但写不动，
+     * 否则任一县账号都能删掉全州共用的上级政策。ALL（管理员/州级）放行。
+     */
+    public void assertCreatorCounty(Long createBy, String label) {
+        Ctx c = current();
+        if (c.scope == Scope.ALL) return;
+        String cc = countyOfUser(createBy);
+        if (cc == null) throw new BizException("无权操作" + label + "（上级下发数据，仅可查看）");
+        if (!cc.equals(c.countyCode)) throw new BizException("无权操作" + label + "（非本县数据）");
     }
 
     /** 该用户是否有「分配数据」显式授权；无=走县码规则。 */

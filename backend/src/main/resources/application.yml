@@ -26,16 +26,19 @@ spring:
       validation-query: SELECT 1 FROM DUAL
       test-while-idle: true
       time-between-eviction-runs-millis: 60000
+      # Druid 监控台默认关闭（暴露全量 SQL 明细）；需要时 YKT_DRUID_STAT=true 并配好凭据再开
       stat-view-servlet:
-        enabled: true
-        login-username: admin
-        login-password: admin
+        enabled: ${YKT_DRUID_STAT:false}
+        login-username: ${YKT_DRUID_USER:druid_admin}
+        login-password: ${YKT_DRUID_PWD:change_me_before_enable}
 
 mybatis-plus:
   mapper-locations: classpath:mapper/*.xml
   type-aliases-package: com.bosi.ykt.entity
   configuration:
-    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+    # 默认不打 SQL 明细：花名册/补贴对象的 SQL 带身份证、银行卡号，
+    # 打开就等于把敏感数据写满日志。开发要看 SQL 走 dev profile（start.ps1 已默认带上）。
+    log-impl: org.apache.ibatis.logging.nologging.NoLoggingImpl
     map-underscore-to-camel-case: true
     jdbc-type-for-null: 'null'
   global-config:
@@ -56,5 +59,39 @@ ykt:
 
 logging:
   level:
+    com.bosi.ykt: info
+    com.bosi.ykt.mapper: info
+
+---
+# 开发 profile（--spring.profiles.active=dev，start.ps1 已默认带上）：打开 SQL 明细。
+#
+# 【为什么把「安全」放在默认、把「好调试」放在 profile 里】
+# 原先反过来——默认 debug+StdOutImpl，靠 prod profile 去关。但全仓没有任何部署脚本或
+# 文档固化 --spring.profiles.active=prod，也就是说 `java -jar` 直接起就是全量 SQL 日志，
+# 忘加一个参数 = 身份证/银行卡号写满日志文件。默认值必须是安全的那一端，
+# 开发便利用显式 profile 换取，漏配的后果才从「泄漏」变成「少看点日志」。
+spring:
+  config:
+    activate:
+      on-profile: dev
+mybatis-plus:
+  configuration:
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+logging:
+  level:
     com.bosi.ykt: debug
     com.bosi.ykt.mapper: debug
+
+---
+# 生产 profile：与默认一致，保留以便显式声明部署意图（也防将来默认值又被改回 debug）
+spring:
+  config:
+    activate:
+      on-profile: prod
+mybatis-plus:
+  configuration:
+    log-impl: org.apache.ibatis.logging.nologging.NoLoggingImpl
+logging:
+  level:
+    com.bosi.ykt: info
+    com.bosi.ykt.mapper: info

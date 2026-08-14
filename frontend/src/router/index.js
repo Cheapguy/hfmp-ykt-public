@@ -1,4 +1,5 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import { ensurePerms, hasPath } from '../store/perm'
 
 const Login = () => import('../views/Login.vue')
@@ -118,8 +119,15 @@ router.beforeEach(async (to) => {
   // 公共页（工作台/403）与未实现占位页不做菜单校验
   if (to.meta.public || to.name === 'Placeholder') return true
   // 菜单拉取失败时不能 return true 放行——那会渲染受保护页面的外壳(fail-open)。
-  // 401 由 axios 拦截器兜底跳登录；其余错误回落到公共工作台，绝不带着未校验的权限进受保护页。
-  try { await ensurePerms() } catch (e) { return { path: '/dashboard' } }
+  // 但也不能静默回工作台：接口挂了和真没权限在用户眼里都是"点了没反应"，排障时分不清。
+  // 401 直接回登录（axios 拦截器也会跳，这里显式 return 避免两个导航打架）；其余给出提示。
+  try {
+    await ensurePerms()
+  } catch (e) {
+    if (e?.code === 401) return { path: '/login', query: { redirect: to.fullPath } }
+    ElMessage.error('权限加载失败，请刷新重试')
+    return { path: '/dashboard' }
+  }
   // 页面级权限 = 用户菜单里有该 path（meta.perm 可显式指定所需菜单，供无独立菜单的子页继承）
   const need = to.meta.perm ? [].concat(to.meta.perm) : [to.path]
   if (need.some(p => hasPath(p))) return true

@@ -57,8 +57,41 @@ public class YktNoticeController extends BaseCrudController<YktNoticeMapper, Ykt
         if (title != null && !title.toString().isBlank()) w.like("TITLE", title.toString().trim());
         Object fn = params.get("fileName");
         if (fn != null && !fn.toString().isBlank()) w.like("FILE_NAME", fn.toString().trim());
+        // 县域隔离：本县自建 + 上级下发（创建人推不出县）。此前只有 TENANT_ID，
+        // 八个县的主管部门共用 role 4，彼此的公告可读可改可删可重新下发。
+        dataScope.applyCreatorCounty(w, "CREATE_BY");
         w.orderByDesc("CREATE_TIME");
         return w;
+    }
+
+    /** 读取越权兜底：detail 按 id 直读同样过县域（列表已由 buildQuery 收窄）。 */
+    @Override
+    protected void assertReadable(YktNotice n) {
+        if (!dataScope.creatorCountyReadable(n.getCreateBy()))
+            throw new BizException("无权查看该公告（非本县数据）");
+    }
+
+    /** 写入越权兜底：只能动本县发布的公告；上级下发的读得到改不动。 */
+    @Override
+    protected void assertWritable(YktNotice n) {
+        dataScope.assertCreatorCounty(n.getCreateBy(), "该公告");
+    }
+
+    @Override
+    public R<?> update(@RequestBody YktNotice n) {
+        // 按库中原行判权——请求体的 CREATE_BY 客户端可控，且通常为 null
+        // （走 super.update 会被 assertCreatorCounty 当成上级数据误拦）
+        assertWritable(loadOwned(n.getId()));
+        n.setCreateBy(null);   // 防随请求体篡改归属
+        mapper.updateById(n);
+        return R.ok();
+    }
+
+    /** 取库中原行；不存在按越权处理，防直连传别县 id 探测。 */
+    private YktNotice loadOwned(Long id) {
+        YktNotice old = id == null ? null : mapper.selectById(id);
+        if (old == null) throw new BizException("公告不存在");
+        return old;
     }
 
     /** 上传通知：文件落 base-dir，登记一条公告（title/fileName=原始文件名，fileUrl 指向 /files/preview） */
@@ -109,8 +142,15 @@ public class YktNoticeController extends BaseCrudController<YktNoticeMapper, Ykt
     @PostMapping("/dispatch")
     public R<?> dispatch(@RequestBody DispatchReq req) {
         if (req.getNoticeId() == null) throw new BizException("缺少公告");
-        YktNotice n = mapper.selectById(req.getNoticeId());
-        if (n == null) throw new BizException("公告不存在");
+        YktNotice n = loadOwned(req.getNoticeId());
+        assertWritable(n);   // 下发=改公告可见范围，只能动本县自建的
+        // 下发目标必须是本县乡镇：towns() 只给本县候选，但 dispatch 直吃请求体，
+        // 不校验就能把公告塞进别县乡镇的「通知下载」列表
+        if (req.getOrgIds() != null) {
+            for (Long oid : req.getOrgIds()) {
+                if (oid != null) dataScope.assertTown(oid, "该下发单位");
+            }
+        }
         String ids = (req.getOrgIds() == null) ? "" :
                 req.getOrgIds().stream().filter(Objects::nonNull).map(String::valueOf)
                         .collect(Collectors.joining(","));
