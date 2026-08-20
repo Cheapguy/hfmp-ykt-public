@@ -612,8 +612,9 @@ function openImport() {
   importVisible.value = true
 }
 function onFileChange(e) {
-  importFile.value = e.target.files?.[0] || null
+  const f = e.target.files?.[0] || null
   e.target.value = ''
+  importFile.value = checkUploadFile(f, { exts: ['.xlsx', '.xls'], maxMB: MAX_IMPORT_MB, label: '清册文件' }) ? f : null
 }
 async function downloadTemplate() {
   if (!needBatch()) return   // 模板列按批次所属项目的发放表定义生成

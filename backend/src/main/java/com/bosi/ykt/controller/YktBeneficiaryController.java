@@ -153,8 +153,29 @@ public class YktBeneficiaryController extends BaseCrudController<YktBeneficiaryM
         return r;
     }
 
+    /**
+     * 表单写入口的身份证校验：位数 + GB 11643 校验位。
+     * 与导入路径同口径——对象库是全流程的源头，错号进了这里，批量填报会原样拷进花名册，
+     * 送审那道「与补贴对象库一致」的比对两边都错照样通过，最后到银行才退回。
+     * 空值放行（成员身份证在部分档案里确实可空），交由各自的必填规则去管。
+     */
+    private void checkIdCards(YktBeneficiary e) {
+        checkIdCard("户主身份证号", e.getHeadIdCard());
+        checkIdCard("身份证号码", e.getIdCard());
+    }
+
+    private void checkIdCard(String label, String v) {
+        if (v == null || v.isBlank()) return;
+        String s = v.trim();
+        if (s.length() != 18)
+            throw new BizException(label + "：" + s + " ，位数(" + s.length() + ")错误，请核对！");
+        if (!com.bosi.ykt.common.IdCard.checksumOk(s))
+            throw new BizException(label + "：" + s + " ，校验位不正确，请核对！");
+    }
+
     @Override
     public R<?> create(@org.springframework.web.bind.annotation.RequestBody YktBeneficiary e) {
+        checkIdCards(e);                 // 源头校验：位数 + 校验位
         fillTownFromVillage(e);          // 前端表单只选村委会，按村委会推乡镇归属
         assertTownScope(e.getTownId());
         // REFERRED 是系统管理标记，不接受客户端赋值：本接口一律按普通新增(0)处理并做全库查重。
@@ -171,6 +192,7 @@ public class YktBeneficiaryController extends BaseCrudController<YktBeneficiaryM
     @Transactional(rollbackFor = Exception.class)
     public R<?> update(@org.springframework.web.bind.annotation.RequestBody YktBeneficiary e) {
         if (e.getId() == null) throw new com.bosi.ykt.common.BizException("缺少 id");
+        checkIdCards(e);                 // 源头校验：位数 + 校验位
         YktBeneficiary old = assertExisting(e.getId());
         // 同 create：REFERRED 不可由客户端改动（置 null → MP updateById 跳过该列，保留库中原值）。
         // 双向都要挡：0→1 能凭空造引用档绕审批流；1→0 能把引用副本洗成「原始建档」，原乡镇的删除保护就失效了。
@@ -436,9 +458,16 @@ public class YktBeneficiaryController extends BaseCrudController<YktBeneficiaryM
             e.setStatus(status);
             e.setHouseholdCode(v[1]); e.setHeadName(v[2]); e.setHeadIdCard(v[3]);
             e.setName(v[4]); e.setIdCard(v[5]);
-            for (int c : new int[]{3, 5})
-                if (!v[c].isEmpty() && v[c].length() != 18)
+            // 户主/成员身份证：位数 + 校验位。对象库是全流程的源头——错号先进这里，
+            // 批量填报会原样拷进花名册，送审那道「与补贴对象库一致」两边都错照样通过，
+            // 要到银行退回才暴露。所以校验必须落在源头，不能只拦花名册表单那一处。
+            for (int c : new int[]{3, 5}) {
+                if (v[c].isEmpty()) continue;
+                if (v[c].length() != 18)
                     errs.add("Excel行号：" + rowNo + " " + HEADERS.get(c) + "：" + v[c] + " ，位数(" + v[c].length() + ")错误，请核对！");
+                else if (!com.bosi.ykt.common.IdCard.checksumOk(v[c]))
+                    errs.add("Excel行号：" + rowNo + " " + HEADERS.get(c) + "：" + v[c] + " ，校验位不正确，请核对！");
+            }
 
             // 村(居)委会：认「名称」或「编码-名称」；须在本人辖区内，同名跨乡镇须用编码消歧
             if (!v[6].isEmpty()) {

@@ -46,7 +46,7 @@
     <el-dialog v-model="upVisible" title="导入选项" width="560px" @closed="onUpClosed">
       <div class="up-warn">请勿上传涉密和违反国家有关政策、法规的文件、图片等！</div>
       <el-upload ref="upRef" drag :auto-upload="false" :limit="1" :on-change="onFileChange"
-        :on-exceed="onExceed" :on-remove="() => file = null">
+        :accept="NOTICE_ACCEPT" :on-exceed="onExceed" :on-remove="() => file = null">
         <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
         <div class="el-upload__text">将文件拖到此处，或<em>点击选择</em></div>
       </el-upload>
@@ -80,7 +80,13 @@ import { ref, reactive, onMounted, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Upload, Delete, Promotion, UploadFilled } from '@element-plus/icons-vue'
 import { noticeApi } from '../../api/system'
+import { checkUploadFile } from '../../utils/upload'
 import { downloadFile } from '../../utils/download'
+
+// 与后端 UploadExt 白名单同口径（公告只发文档/图片/压缩包）
+const NOTICE_EXTS = ['.pdf', '.doc', '.docx', '.wps', '.ofd', '.xls', '.xlsx', '.ppt', '.pptx',
+  '.txt', '.csv', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.zip', '.rar', '.7z']
+const NOTICE_ACCEPT = NOTICE_EXTS.join(',')
 
 // ---- 列表 ----
 const tblRef = ref(null)
@@ -125,10 +131,18 @@ const file = ref(null)
 const uploading = ref(false)
 
 function openUpload() { file.value = null; upVisible.value = true }
-function onFileChange(f) { file.value = f.raw }
+// 选中即校验：不通过就把它从上传列表里摘掉，避免用户以为已经选上了
+function onFileChange(f) {
+  if (!checkUploadFile(f?.raw, { exts: NOTICE_EXTS, label: '公告附件' })) {
+    upRef.value?.clearFiles(); file.value = null; return
+  }
+  file.value = f.raw
+}
+// 超出 limit=1 时用新文件替换旧的——这条路径同样要过校验，否则拖第二个文件就绕过了
 function onExceed(files) {
   upRef.value?.clearFiles()
   const f = files[0]
+  if (!checkUploadFile(f, { exts: NOTICE_EXTS, label: '公告附件' })) { file.value = null; return }
   upRef.value?.handleStart(f)
   file.value = f
 }

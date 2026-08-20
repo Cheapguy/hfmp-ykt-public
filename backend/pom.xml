@@ -102,6 +102,13 @@
             <optional>true</optional>
         </dependency>
 
+        <!-- 富文本正文入库前消毒（政策/公告等 CLOB 字段），见 common/HtmlSanitizer -->
+        <dependency>
+            <groupId>org.jsoup</groupId>
+            <artifactId>jsoup</artifactId>
+            <version>1.15.3</version>
+        </dependency>
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>

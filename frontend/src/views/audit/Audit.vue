@@ -199,7 +199,9 @@ async function reload() {
       projectId: query.projectId || undefined, batchCode: query.batchCode || undefined
     })
     rows.value = res?.records || []
-    page.total = res?.total || 0
+    // 后端把 Long 序列化成字符串（雪花 id 精度），total 也不例外——
+    // 字符串丢给 el-pagination 会按字符串算页数，翻页器直接错乱，必须转数值
+    page.total = Number(res?.total) || 0
   } finally { loading.value = false }
 }
 

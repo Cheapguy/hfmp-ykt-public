@@ -400,8 +400,12 @@ public class YktRosterEditController {
         checkIdCard("享受人身份证号码", d.getBeneficiaryIdCard());
     }
     private void checkIdCard(String label, String v) {
-        if (v != null && !v.isBlank() && v.trim().length() != 18)
-            throw new BizException(label + "：" + v.trim() + " ，位数(" + v.trim().length() + ")错误，请核对！");
+        if (v == null || v.isBlank()) return;
+        String s = v.trim();
+        if (s.length() != 18)
+            throw new BizException(label + "：" + s + " ，位数(" + s.length() + ")错误，请核对！");
+        if (!com.bosi.ykt.common.IdCard.checksumOk(s))
+            throw new BizException(label + "：" + s + " ，校验位不正确，请核对！");
     }
 
     /**
@@ -999,6 +1003,8 @@ public class YktRosterEditController {
                     case "idcard" -> {
                         if (v.length() != 18)
                             errs.add("Excel行号：" + rowNo + " " + idcardLabel(col) + "：" + v + " ，位数(" + v.length() + ")错误，请核对！");
+                        else if (!com.bosi.ykt.common.IdCard.checksumOk(v))
+                            errs.add("Excel行号：" + rowNo + " " + idcardLabel(col) + "：" + v + " ，校验位不正确，请核对！");
                     }
                     case "int" -> {
                         if (!INT_FMT.matcher(v).matches())

@@ -121,9 +121,19 @@ public class YktProjectQuotaController {
         Integer maxP = mapper.selectList(new LambdaQueryWrapper<YktProjectQuota>()
                         .eq(YktProjectQuota::getProjectId, req.getProjectId()))
                 .stream().map(YktProjectQuota::getPriority).filter(Objects::nonNull).max(Integer::compareTo).orElse(0);
+        // 已挂接的指标集合：/available 只是候选列表侧的过滤，直连 POST 或重复点两次「保存」
+        // 都能把同一个指标再挂一遍。同一指标挂两条，computeDeduction 就会把它的额度算两份，
+        // 支付时按虚高的可用额去扣——SQL 余额守卫会挡住扣负，但那时整单已经回滚，
+        // 表现成「额度明明够却发不出去」，谁也想不到根因是挂接表里有重复行。
+        Set<Long> exists = new HashSet<>();
+        mapper.selectList(new LambdaQueryWrapper<YktProjectQuota>()
+                        .eq(YktProjectQuota::getProjectId, req.getProjectId()))
+                .forEach(q -> { if (q.getIndicatorId() != null) exists.add(q.getIndicatorId()); });
+
         int p = maxP;
         int n = 0;
         for (Long indId : req.getIndicatorIds()) {
+            if (indId == null || !exists.add(indId)) continue;   // 请求体内自身重复也一并去重
             YktIndicator ind = indicatorMapper.selectById(indId);
             if (ind == null) continue;
             YktProjectQuota q = new YktProjectQuota();

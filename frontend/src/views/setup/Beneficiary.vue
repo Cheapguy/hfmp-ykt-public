@@ -599,7 +599,11 @@ const fileInput = ref(null)
 const importVisible = ref(false); const importing = ref(false); const importFile = ref(null)
 const exporting = ref(false)
 function openImport() { importFile.value = null; importVisible.value = true }
-function onFileChange(e) { importFile.value = e.target.files?.[0] || null; e.target.value = '' }
+function onFileChange(e) {
+  const f = e.target.files?.[0] || null
+  e.target.value = ''
+  importFile.value = checkUploadFile(f, { exts: ['.xlsx', '.xls'], maxMB: MAX_IMPORT_MB, label: '导入文件' }) ? f : null
+}
 async function downloadTemplate() {
   saveBlob(await beneficiaryApi.importTemplate(), '补贴对象导入模板.xls')
 }

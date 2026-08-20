@@ -131,7 +131,7 @@ public class YktProjectController extends BaseCrudController<YktProjectMapper, Y
 
     /**
      * 政策文件附件上传：文件落 base-dir（uuid 重命名防覆盖/穿越），返回 /files/preview 下载地址。
-     * 前端把 url 存入 POLICY_FILE；下载走免登录的 /files/preview（同公告附件口径）。
+     * 前端把 url 存入 POLICY_FILE；下载走需登录的 /files/preview（同公告附件口径，前端 axios 取 blob）。
      * 走 /dept/project 前缀 = 继承菜单 301 写保护，仅项目岗可传。
      */
     @PostMapping("/upload")
@@ -139,7 +139,7 @@ public class YktProjectController extends BaseCrudController<YktProjectMapper, Y
         if (file == null || file.isEmpty()) throw new BizException("请选择要上传的文件");
         String original = file.getOriginalFilename();
         if (original == null || original.isBlank()) original = "policy";
-        String ext = com.bosi.ykt.common.UploadExt.checkedExt(original);   // 扩展名白名单
+        String ext = com.bosi.ykt.common.UploadExt.checkedExt(file);   // 扩展名白名单 + 文件头比对
         int dot = original.lastIndexOf('.');
         String stored = UUID.randomUUID().toString().replace("-", "") + ext;
 

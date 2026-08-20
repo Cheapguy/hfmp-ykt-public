@@ -101,7 +101,7 @@ public class YktNoticeController extends BaseCrudController<YktNoticeMapper, Ykt
         if (file == null || file.isEmpty()) throw new BizException("请选择要上传的文件");
         String original = file.getOriginalFilename();
         if (original == null || original.isBlank()) original = "notice";
-        String ext = com.bosi.ykt.common.UploadExt.checkedExt(original);   // 扩展名白名单
+        String ext = com.bosi.ykt.common.UploadExt.checkedExt(file);   // 扩展名白名单 + 文件头比对
         String stored = UUID.randomUUID().toString().replace("-", "") + ext;
 
         Path dir = Paths.get(baseDir);

@@ -31,7 +31,6 @@
           </div>
         </el-form-item>
         <el-button type="primary" size="large" class="btn-login" :loading="loading" @click="onSubmit">登 录</el-button>
-        <div class="login-tip">默认账号 admin / admin123</div>
       </el-form>
     </div>
     <div class="login-footer">© 甘肃省惠民惠农财政补贴"一卡通"管理模块</div>
@@ -50,11 +49,27 @@ const router = useRouter()
 const route = useRoute()
 const formRef = ref()
 const loading = ref(false)
-const form = reactive({ username: 'admin', password: 'admin123' })
+// 不预填任何账号：登录页把默认口令写在表单里（和下方提示语里），等于对着公网喊
+// 「这套系统的管理员是 admin，密码 admin123」，而这个账号在很多环境里确实没改过。
+const form = reactive({ username: '', password: '' })
 const captcha = reactive({ required: false, key: '', img: '', code: '' })
 const rules = {
   username: [{ required: true, message: '请输入账号', trigger: 'blur' }],
   password: [{ required: true, message: '请输入密码', trigger: 'blur' }]
+}
+
+/**
+ * 登录后跳转目标白名单。
+ * route.query.redirect 完全由 URL 决定：`?redirect=//evil.example/x` 会被浏览器按
+ * 协议相对地址解析成外站，做成一封「请重新登录」的钓鱼链接，用户登完就被送出去；
+ * 同名参数出现多次时它还会变成数组，直接丢给 router 会报错。
+ * 只接受「单个、以 / 开头、且不以 // 或 /\ 开头」的站内路径。
+ */
+function safeRedirect(raw) {
+  const to = Array.isArray(raw) ? raw[0] : raw
+  if (typeof to !== 'string') return '/dashboard'
+  if (!to.startsWith('/') || to.startsWith('//') || to.startsWith('/\\')) return '/dashboard'
+  return to
 }
 
 async function refreshCaptcha() {
@@ -79,7 +94,7 @@ async function onSubmit() {
     }))
     resetPerms()   // 换账号后菜单权限重新拉取
     ElMessage.success('登录成功')
-    router.replace(route.query.redirect || '/dashboard')
+    router.replace(safeRedirect(route.query.redirect))
   } catch (e) {
     // 4281 = 后端要求验证码（首次触发或输错）：展示/刷新验证码
     if (e && e.code === 4281) { captcha.required = true; refreshCaptcha() }

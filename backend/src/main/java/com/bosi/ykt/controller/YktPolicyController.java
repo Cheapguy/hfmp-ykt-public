@@ -3,6 +3,7 @@ package com.bosi.ykt.controller;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.bosi.ykt.common.BaseCrudController;
 import com.bosi.ykt.common.BizException;
+import com.bosi.ykt.common.HtmlSanitizer;
 import com.bosi.ykt.common.R;
 import com.bosi.ykt.entity.YktPolicy;
 import com.bosi.ykt.mapper.YktPolicyMapper;
@@ -58,6 +59,7 @@ public class YktPolicyController extends BaseCrudController<YktPolicyMapper, Ykt
     @Override
     public R<?> create(@RequestBody YktPolicy p) {
         validate(p);
+        p.setContent(HtmlSanitizer.clean(p.getContent()));
         // 新建不校验归属：CREATE_BY 由 MetaObjectHandler 按登录态填，天然落本县
         getMapper().insert(p);
         return R.ok(p);
@@ -66,6 +68,7 @@ public class YktPolicyController extends BaseCrudController<YktPolicyMapper, Ykt
     @Override
     public R<?> update(@RequestBody YktPolicy p) {
         validate(p);
+        p.setContent(HtmlSanitizer.clean(p.getContent()));
         // 按**库中原行**判权：请求体里的 CREATE_BY 由客户端可控，拿它判等于自证清白。
         // 也因此不能走 super.update()——基类会拿请求体再判一次，而请求体通常不带 CREATE_BY，
         // 会被 assertCreatorCounty 当成「上级下发数据」误拦，合法修改反而失败。
