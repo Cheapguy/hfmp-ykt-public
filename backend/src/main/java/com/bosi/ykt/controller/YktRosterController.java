@@ -49,9 +49,12 @@ public class YktRosterController {
         return r;
     }
 
-    /** 审核状态推进次序 */
+    /**
+     * 审核状态推进次序。
+     * 不含 DRAFT：待编制只能走 {@code /submit}（那条路才跑 validate 与补贴对象库比对）。
+     * 原先 DRAFT→TOWN_SUBMIT 也挂在这张表里，等于点「审核」就能把没校验过的记录送上去。
+     */
     private static final Map<String, String> NEXT = Map.of(
-            "DRAFT", "TOWN_SUBMIT",
             "TOWN_SUBMIT", "TOWN_AUDIT",
             "TOWN_AUDIT", "DEPT_SUBMIT",
             "DEPT_SUBMIT", "FINAL"
@@ -113,9 +116,14 @@ public class YktRosterController {
     public R<Map<String, Object>> batchFill(@RequestBody BatchFillReq req) {
         if (req.getBatchId() == null) throw new BizException("缺少批次");
         assertBatchScope(req.getBatchId());   // 县域越权兜底：不能替别县批次批量填报
+        // 拉人范围锁死为「本批次所属乡镇」，不采纳客户端 townId：原先 townId 省略时条件整条不生效，
+        // 一个不带 townId 的请求就会把全租户 STATUS=1 的补贴对象（含外县身份证）全拷进本批次。
+        YktBatch batch = batchMapper.selectById(req.getBatchId());
+        Long townId = batch == null ? null : batch.getTownId();
+        if (townId == null) throw new BizException("批次未指定下达单位（乡镇），无法批量填报");
         List<YktBeneficiary> people = beneficiaryMapper.selectList(
                 new LambdaQueryWrapper<YktBeneficiary>()
-                        .eq(req.getTownId() != null, YktBeneficiary::getTownId, req.getTownId())
+                        .eq(YktBeneficiary::getTownId, townId)
                         .eq(req.getVillageId() != null, YktBeneficiary::getVillageId, req.getVillageId())
                         .eq(YktBeneficiary::getStatus, "1"));
         int n = 0;
@@ -163,6 +171,9 @@ public class YktRosterController {
     @PostMapping("/{id}/return")
     public R<?> back(@PathVariable Long id) {
         YktRoster r = assertRosterScope(id);   // 县域越权兜底
+        // 终审后不再是审核链上的记录，退回它等于把已定稿数据重新打开；DRAFT 本来就在待编制态
+        if ("FINAL".equals(r.getAuditStatus())) throw new BizException("已终审的花名册不能退回");
+        if ("DRAFT".equals(r.getAuditStatus())) throw new BizException("花名册已是待编制状态");
         r.setAuditStatus("DRAFT");
         mapper.updateById(r);
         return R.ok();

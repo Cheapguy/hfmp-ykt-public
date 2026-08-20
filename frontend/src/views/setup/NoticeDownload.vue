@@ -27,6 +27,7 @@ import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Download } from '@element-plus/icons-vue'
 import { noticeApi } from '../../api/system'
+import { downloadFile } from '../../utils/download'
 
 const rows = ref([]); const loading = ref(false); const selected = ref([])
 
@@ -38,11 +39,12 @@ async function reload() {
   } finally { loading.value = false }
 }
 
-function download() {
+// 附件接口已改为需登录，不能再靠 window.open 直链（新窗口不带 Authorization 头）
+async function download() {
   if (!selected.value.length) return ElMessage.warning('请勾选要下载的通知')
-  const urls = selected.value.filter(r => r.fileUrl)
-  if (!urls.length) return ElMessage.warning('所选通知无附件')
-  urls.forEach(r => window.open(r.fileUrl, '_blank'))
+  const list = selected.value.filter(r => r.fileUrl)
+  if (!list.length) return ElMessage.warning('所选通知无附件')
+  for (const r of list) await downloadFile(r.fileUrl, r.fileName)
 }
 function extOf(name) {
   if (!name) return '-'

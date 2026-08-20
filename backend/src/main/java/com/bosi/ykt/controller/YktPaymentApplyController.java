@@ -103,13 +103,20 @@ public class YktPaymentApplyController {
         assertScope(req.getBatchId());
         YktBatch b = batchMapper.selectById(req.getBatchId());
         if (b == null) throw new BizException("批次不存在");
-        // 条件更新抢占批次（并发防护）：两个请求同时发起支付时只有一个能把 SENT 翻成 PAID
+        // 条件更新抢占批次（并发防护）：两个请求同时发起支付时只有一个能把 SENT 翻成 PAID。
+        // 这里先动批次不违反「先申请后批次」的加锁次序：gen 对申请表只做 INSERT（全新行，
+        // 不与任何既有申请行争锁），不存在和 bankPay/revoke 互等的可能。
         int claimed = batchMapper.update(null, new UpdateWrapper<YktBatch>()
                 .eq("ID", b.getId()).eq("STATUS", "SENT")
                 .set("STATUS", "PAID").set("LAST_RESULT", "已支付"));
         if (claimed == 0) throw new BizException("仅已发送一体化的批次可发起支付（状态已变更，请刷新）");
 
         BigDecimal amount = applyAmount(b);
+        // 金额 ≤0 的批次不该走支付：computeDeduction 对 0 会返回空扣减清单，于是批次被翻成
+        // 已支付、花名册全标「已生成支付申请」，却没有任何指标扣减和支付明细——账实从此对不上。
+        // 抛在抢占之后没关系，@Transactional 会把 STATUS 一起回滚。
+        if (amount == null || amount.signum() <= 0)
+            throw new BizException("批次发放金额为 0，不能发起支付");
         List<Deduct> ded = computeDeduction(b.getProjectId(), amount);   // 不足会抛异常
 
         YktPaymentApply a = new YktPaymentApply();
@@ -147,15 +154,29 @@ public class YktPaymentApplyController {
         Long batchId = body.get("batchId") == null ? null : Long.valueOf(String.valueOf(body.get("batchId")));
         if (batchId == null) throw new BizException("缺少批次");
         assertScope(batchId);
-        // 条件更新抢占批次（并发防护）：只有一个请求能把 PAID 翻回 SENT，防止额度被双份回滚
+
+        // 加锁顺序统一为「先申请行、后批次行」，与 bankPay / remove 保持一致。
+        // 原先这里是反的（先抢批次再动申请），而 bankPay 是先抢申请再改批次——
+        // 两个事务并发就是标准的 AB-BA 互等：revoke 持有 YKT_BATCH 行等 YKT_PAYMENT_APPLY 行，
+        // bankPay 持有 YKT_PAYMENT_APPLY 行等 YKT_BATCH 行，Oracle 直接抛 ORA-00060 死锁，
+        // 而这两个操作恰恰都在动钱（额度回滚 / 代发结果），最不该以死锁收场。
+        List<YktPaymentApply> applies = mapper.selectList(new LambdaQueryWrapper<YktPaymentApply>()
+                .eq(YktPaymentApply::getBatchId, batchId));
+        for (YktPaymentApply a : applies) {
+            if ("PAID".equals(a.getStatus())) throw new BizException("支付申请已支付完成，不可撤销");
+            // 条件更新抢占申请行：既排他锁住这一行，又挡住「代发已经把它翻成 PAID」的竞争
+            int c = mapper.update(null, new UpdateWrapper<YktPaymentApply>()
+                    .eq("ID", a.getId()).ne("STATUS", "PAID").set("STATUS", "REVOKING"));
+            if (c == 0) throw new BizException("支付申请状态已变更（可能已完成银行代发），请刷新后重试");
+        }
+
+        // 再抢批次：只有一个请求能把 PAID 翻回 SENT，防止额度被双份回滚
         int claimed = batchMapper.update(null, new UpdateWrapper<YktBatch>()
                 .eq("ID", batchId).eq("STATUS", "PAID")
                 .set("STATUS", "SENT").set("LAST_RESULT", "已发送一体化"));
         if (claimed == 0) throw new BizException("仅已支付批次可撤销支付（状态已变更，请刷新）");
 
-        for (YktPaymentApply a : mapper.selectList(new LambdaQueryWrapper<YktPaymentApply>()
-                .eq(YktPaymentApply::getBatchId, batchId))) {
-            if ("PAID".equals(a.getStatus())) throw new BizException("支付申请已支付完成，不可撤销");
+        for (YktPaymentApply a : applies) {
             rollbackApply(a.getId());
             mapper.deleteById(a.getId());
         }
@@ -298,8 +319,14 @@ public class YktPaymentApplyController {
         if (a == null) throw new BizException("支付申请不存在");
         assertScope(a.getBatchId());
         if ("PAID".equals(a.getStatus())) throw new BizException("已支付的申请不可删除");
-        // 先删申请行抢占（并发防护）：删到才继续，防两个请求各回滚一遍额度
-        if (mapper.deleteById(a.getId()) == 0) throw new BizException("该支付申请已被处理，请刷新");
+        // 抢占式删除：条件带 STATUS<>'PAID'，和 revoke 同一档。
+        // 上面那句 selectById 的判断只是快照——读到「不是 PAID」之后、删除之前，
+        // bankPay 完全可能把它翻成 PAID 并提交；没有条件的 deleteById 照删不误，
+        // 接着 rollbackApply 把已经实付的额度又加回可用，等于凭空多出一笔钱。
+        int killed = mapper.delete(new LambdaQueryWrapper<YktPaymentApply>()
+                .eq(YktPaymentApply::getId, a.getId())
+                .ne(YktPaymentApply::getStatus, "PAID"));
+        if (killed == 0) throw new BizException("该支付申请已被处理（可能已完成银行代发），请刷新");
         rollbackApply(a.getId());
         // 批次退回终审，一卡通侧需重新「批次发送一体化」
         int r = batchMapper.update(null, new UpdateWrapper<YktBatch>()
@@ -396,6 +423,13 @@ public class YktPaymentApplyController {
         grantMapper.update(null, grantScopeUpdate(b.getId())
                 .eq("PAY_STATUS", "已生成支付申请")
                 .set("PAY_STATUS", "已支付").set("FAIL_REASON", null));
+        // 已停发明细归「已退款」：钱本来就没发出去（applyAmount 排除了它们），上面也已按退款金额计数。
+        // 不改状态的话它们会永远停在「已停发」——既不在更正发放列表（CORRECTABLE 不含它），
+        // 也不能再取消停发（批次已过 ISSUED），成为谁也捡不起来的孤儿数据。
+        // STOP_REASON 保留，后续更正时还能看到当初为什么停。
+        grantMapper.update(null, grantScopeUpdate(b.getId())
+                .eq("PAY_STATUS", "已停发")
+                .set("PAY_STATUS", "已退款"));
 
         // 指标核算：解冻全部，成功额转「已支付」，失败额退回「可用」（钱守恒）；原子 SQL 防并发覆盖
         BigDecimal failRemain = failAmt;

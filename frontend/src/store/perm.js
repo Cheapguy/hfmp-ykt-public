@@ -26,16 +26,16 @@ export function ensurePerms() {
   return loading
 }
 
-export function isAdmin() {
-  try { return JSON.parse(localStorage.getItem('ykt_user') || '{}').userType === 'SYS_ADMIN' }
-  catch { return false }
-}
+// 这里原来有个 isAdmin()：读 localStorage.ykt_user.userType === 'SYS_ADMIN' 就一路放行。
+// 那是把权限判据交给了用户自己能改的存储——F12 改一行就能点亮全部菜单和按钮。
+// 写接口当然还是 403，但 writeOnly 的 GET、报表和查询页会在 UI 里整个摊开。
+// 判据只认服务端下发的 /auth/menus：SYS_ADMIN 本来就会拿到全量菜单，不需要这条捷径。
 
 /** 页面级：是否拥有该菜单 path */
-export function hasPath(p) { return isAdmin() || paths.has(p) }
+export function hasPath(p) { return paths.has(p) }
 
 /** 按钮级（v-perm）：兼容 permission 码与菜单 path 两种写法 */
-export function hasPerm(code) { return isAdmin() || perms.has(code) || paths.has(code) }
+export function hasPerm(code) { return perms.has(code) || paths.has(code) }
 
 export function grantedMenus() { return menus || [] }
 

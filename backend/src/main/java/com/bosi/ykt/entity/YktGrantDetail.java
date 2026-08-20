@@ -57,4 +57,8 @@ public class YktGrantDetail extends BaseEntity {
     private String stopReason;
     /** 发放表定义自由列的值（JSON：{itemKey: 值}，来自清册导入未绑定明细字段的列） */
     private String extJson;
+    /** 更正重构的源明细 id（仅更正批次的行有值）；便于回溯这笔钱原本是哪一条失败的 */
+    private Long sourceDetailId;
+    /** 更正重构时的源明细金额（仅更正批次的行有值）：送审校验的金额上限，防越改越多 */
+    private BigDecimal sourceAmount;
 }

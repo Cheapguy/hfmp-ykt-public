@@ -164,13 +164,23 @@ public class YktBatchController extends BaseCrudController<YktBatchMapper, YktBa
     @Override
     public R<?> create(@RequestBody YktBatch b) {
         assertTownScope(b.getTownId());   // 县域越权兜底：不能替别县乡镇建批次
-        if (b.getStatus() == null) b.setStatus("NEW");
-        if (b.getBatchCode() == null || b.getBatchCode().isBlank()) b.setBatchCode(genBatchCode(0));
+        // 白名单，与 update 同口径：客户端只能带「基本信息」。原先是把前端实体直接 insert，
+        // 状态机字段仅在为 null 时兜底——直连 POST {"status":"SENT","auditStage":"DONE"} 就能
+        // 凭空造出一条「已终审、已发送一体化」的批次，整条审核链形同虚设。
+        YktBatch n = new YktBatch();
+        n.setProjectId(b.getProjectId());
+        n.setBatchName(b.getBatchName());
+        n.setFundTitle(b.getFundTitle());
+        n.setDeadline(b.getDeadline());
+        n.setRemark(b.getRemark());
+        n.setTownId(b.getTownId());
+        n.setBatchCode(genBatchCode(0));   // 编号一律服务端生成，不采纳客户端值
+        n.setStatus("NEW");
         // 未送审批次 auditStage 须为 DRAFT，否则会被「发放数据审核」页(ne DRAFT)错误纳入
-        if (b.getAuditStage() == null) b.setAuditStage("DRAFT");
-        mapper.insert(b);
-        writeStartLog(b.getId());
-        return R.ok(b);
+        n.setAuditStage("DRAFT");
+        mapper.insert(n);
+        writeStartLog(n.getId());
+        return R.ok(n);
     }
 
     /**
@@ -184,6 +194,16 @@ public class YktBatchController extends BaseCrudController<YktBatchMapper, YktBa
         if (!"NEW".equals(old.getStatus()) && !"ISSUED".equals(old.getStatus()))
             throw new BizException("批次已进入审核/支付流程，基本信息不可修改");
         if (b.getTownId() != null) assertTownScope(b.getTownId());   // 改下达单位也须在本县内
+        // 换发放表(projectId)不是普通基本信息：它同时决定清册模板列、额度归属和项目级可见性。
+        // 批次一旦下达或已录明细再换，已有明细的列定义与新模板对不上，额度也会挂到另一个项目上。
+        if (b.getProjectId() != null && !b.getProjectId().equals(old.getProjectId())) {
+            if (!"NEW".equals(old.getStatus()))
+                throw new BizException("批次已下达，不可更换发放表");
+            Long details = grantDetailMapper.selectCount(new LambdaQueryWrapper<YktGrantDetail>()
+                    .eq(YktGrantDetail::getBatchId, b.getId()));
+            if (details != null && details > 0)
+                throw new BizException("批次已有发放明细，不可更换发放表");
+        }
         // 白名单：新建干净实体只拷「基本信息」字段，其余(状态机/资金/审核跳级/更正标记/批次编码)一律不采纳。
         // 原先是逐个 setNull 的黑名单——每加一个状态机字段就得记着清一次，加 REJECT_STAGE/IS_CORRECTION 时就漏了：
         // 直连 PUT {"id":x,"isCorrection":0} 能洗掉更正批次全部写守卫，{"rejectStage":"DEPT_REVIEW"} 能让批次

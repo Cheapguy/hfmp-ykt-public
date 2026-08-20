@@ -84,7 +84,7 @@ public class DataScopeResolver {
     private static final String REQ_ATTR = DataScopeResolver.class.getName() + ".CTX";
 
     /**
-     * 解析当前用户的数据范围。取不到用户/机构/县 → 一律按 ALL（不拦，避免登录态异常误锁）。
+     * 解析当前用户的数据范围。取不到用户/机构/县 → 一律最窄拒止（deny），不再回落 ALL。
      * 结果缓存在当前 HTTP 请求属性里（一个请求多次 apply 只解析一次）；非 Web 线程直接解析。
      */
     public Ctx current() {
@@ -101,7 +101,9 @@ public class DataScopeResolver {
 
     private Ctx resolve() {
         Long uid = UserContext.currentUserId();
-        if (uid == null) return Ctx.all();   // 真匿名（health 等公开接口，无 JWT）不误锁；业务接口有认证拦截兜底
+        // 无 uid：JwtInterceptor 已把无 token 的请求 401 掉，能走到这里只可能是「签名有效但 uid 为空」
+        // 的畸形 token——那不是匿名公开接口，给 ALL 等于凭一个空 uid 读全州。最窄拒止。
+        if (uid == null) return Ctx.deny();
         SysUser u = userMapper.selectById(uid);
         // token 有效但用户已不存在（被删/停用清库）：不能回落 ALL（否则已删账号的未过期 token 可读全州），最窄拒止
         if (u == null) return Ctx.deny();
@@ -136,8 +138,10 @@ public class DataScopeResolver {
 
     private static Scope parse(String v) {
         if ("COUNTY".equals(v)) return Scope.COUNTY;
-        if ("OWN_ORG".equals(v)) return Scope.OWN_ORG;
-        return Scope.ALL; // null/未知/STATE → 与列默认一致(ALL)，STATE 的收窄另由 stateOnly 标记
+        if ("ALL".equals(v) || "STATE".equals(v)) return Scope.ALL;   // STATE 的收窄另由 stateOnly 标记
+        // null/未知一律按最窄算。原先回落 ALL，等于「DATA_SCOPE 写错一个字母」= 该角色读全州，
+        // 配置疏忽直接变成越权。现库里 14 个角色取值都是这四个之一，改判据对现状零影响。
+        return Scope.OWN_ORG;
     }
 
     /**
@@ -400,6 +404,36 @@ public class DataScopeResolver {
         } else { // OWN_ORG：本乡镇 + 本县节点
             w.and(x -> x.eq(SysOrg::getId, c.ownTownId).or().eq(SysOrg::getOrgCode, c.countyCode));
         }
+    }
+
+    /** {@link #applyOrgTree(LambdaQueryWrapper)} 的 QueryWrapper 版：给 BaseCrud 的 page/list 用。 */
+    public void applyOrgTree(com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<SysOrg> w) {
+        Ctx c = current();
+        if (c.scope == Scope.ALL) return;
+        if (c.scope == Scope.COUNTY) {
+            w.likeRight("ORG_CODE", c.countyCode);
+        } else {
+            w.and(x -> x.eq("ID", c.ownTownId).or().eq("ORG_CODE", c.countyCode));
+        }
+    }
+
+    /**
+     * 单条机构是否在当前范围内（detail 越权兜底）。
+     * 判据必须与 {@link #applyOrgTree} 逐字对应，否则 page/list/tree 收紧了、
+     * 按 id 直取的 detail 却漏一道——机构不是身份证，但它是数据范围的根。
+     * 特别注意 OWN_ORG：树里是「本乡镇 + 本县节点」精确匹配，不是县码前缀，
+     * 前缀写法会把同县其它乡镇一并放进来。
+     */
+    public boolean orgVisible(SysOrg org) {
+        if (org == null) return false;
+        Ctx c = current();
+        if (c.scope == Scope.ALL) return true;
+        String code = org.getOrgCode();
+        if (c.scope == Scope.COUNTY)
+            return c.countyCode != null && code != null && code.startsWith(c.countyCode);
+        // OWN_ORG
+        return java.util.Objects.equals(org.getId(), c.ownTownId)
+                || (c.countyCode != null && c.countyCode.equals(code));
     }
 
     /** 预聚合结果 Java 侧过滤用：允许的乡镇 id 集；ALL 返回 null（不过滤）。 */

@@ -18,7 +18,8 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 
 /**
- * 上传文件预览/下载。{@code /files/preview/**} 已在 WebConfig 拦截器 excludes 中放行（免登录，供乡镇端下载）。
+ * 上传文件预览/下载。需登录（不在 WebConfig 拦截器 excludes 中），前端走 axios 取 blob 保存，
+ * 见 {@code frontend/src/utils/download.js}。
  */
 @RestController
 @RequestMapping("/files")

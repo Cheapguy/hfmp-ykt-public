@@ -74,6 +74,10 @@ public class LoginGuard {
     /** 登录失败：计数 +1，达到阈值即锁定。 */
     public void onFail(String username) {
         evictIfNeeded(fails);
+        // 淘汰之后仍然满：说明一万个 key 全在锁定期内（只可能是刷随机用户名的恶意流量）。
+        // 此时**只拒绝新 key**，已有的锁一条不动——既保住锁，又给这张表一个真正的硬顶。
+        // 已存在的 key 照常计数，正常用户的锁定/解锁逻辑不受影响。
+        if (fails.size() >= MAX_ENTRIES && !fails.containsKey(username)) return;
         Fail f = fails.computeIfAbsent(username, k -> new Fail());
         synchronized (f) {
             f.count++;
@@ -91,8 +95,15 @@ public class LoginGuard {
     private void evictIfNeeded(ConcurrentHashMap<String, ?> map) {
         if (map.size() < MAX_ENTRIES) return;
         long now = System.currentTimeMillis();
-        if (map == captchas) captchas.entrySet().removeIf(e -> e.getValue().expireAt <= now);
-        else fails.entrySet().removeIf(e -> e.getValue().lockUntil <= now && e.getValue().count == 0);
-        if (map.size() >= MAX_ENTRIES) map.clear();   // 仍超限=纯恶意流量，整体重置最安全
+        if (map == captchas) {
+            captchas.entrySet().removeIf(e -> e.getValue().expireAt <= now);
+            // 验证码全清只是让用户重点一次刷新，没有安全含义
+            if (captchas.size() >= MAX_ENTRIES) captchas.clear();
+            return;
+        }
+        // 失败计数表：只清「当前不在锁定期」的条目，绝不整表 clear。
+        // 原先兜底那句 map.clear() 会把正在生效的锁一起抹掉——攻击者先拿 1 万个随机用户名把表刷满，
+        // 就能一键解锁自己刚刚锁死的目标账号，等于给爆破配了个复位按钮。
+        fails.entrySet().removeIf(e -> e.getValue().lockUntil <= now);
     }
 }

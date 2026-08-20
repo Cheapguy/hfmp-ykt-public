@@ -26,18 +26,39 @@ public abstract class BaseCrudController<M extends BaseMapper<E>, E> {
         return w;
     }
 
+    /**
+     * 单页上限。取 1000 而不是更小：项目关联弹窗按 999 一次性拉全量，压到 200 会截断业务数据。
+     * 没有上限时 {@code pageSize=999999} 就是一条免费的全表导出，county 隔离拦得住跨县、
+     * 拦不住「本县全量身份证一次拖走」。
+     */
+    protected static final long MAX_PAGE_SIZE = 1000;
+
+    /**
+     * {@code /list} 的封顶。比单页宽松：它是各页下拉字典的取数口，村组/机构/项目这类字典
+     * 动辄一两千行且要一次性拿全，压到 1000 会静默截断下拉选项——那种 bug 比一次全表查更难查。
+     * 5000 挡得住的是「无参数全表拖」这类失控查询（如 1.7 万行的联行号库）。
+     */
+    protected static final long MAX_LIST_SIZE = 5000;
+
     @GetMapping("/page")
     public R<IPage<E>> page(@RequestParam(defaultValue = "1") long pageNum,
                             @RequestParam(defaultValue = "10") long pageSize,
                             @RequestParam Map<String, Object> params) {
-        Page<E> p = new Page<>(pageNum, pageSize);
+        Page<E> p = new Page<>(Math.max(pageNum, 1), Math.min(Math.max(pageSize, 1), MAX_PAGE_SIZE));
         QueryWrapper<E> w = buildQuery(params);
         return R.ok(getMapper().selectPage(p, w));
     }
 
+    /**
+     * 全量列表（字典类下拉用）。封顶 {@link #MAX_LIST_SIZE}：这个接口没有任何分页参数，
+     * 原样 selectList 一发就是整表。用分页器封顶而不是拼 {@code last("ROWNUM<=n")}，
+     * 免得和子类 buildQuery 里可能存在的 last 片段互相覆盖。
+     */
     @GetMapping("/list")
     public R<List<E>> list(@RequestParam Map<String, Object> params) {
-        return R.ok(getMapper().selectList(buildQuery(params)));
+        Page<E> p = new Page<>(1, MAX_LIST_SIZE);
+        p.setSearchCount(false);
+        return R.ok(getMapper().selectPage(p, buildQuery(params)).getRecords());
     }
 
     @GetMapping("/{id:\\d+}")

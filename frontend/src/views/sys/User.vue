@@ -2,7 +2,8 @@
   <div>
     <h2 class="page-title">用户管理</h2>
     <CrudTable ref="crud" :api="userApi" :columns="columns" :search-fields="searchFields"
-      :form-fields="formFields" :form-rules="rules" form-width="640px" action-width="220" :detail-before-edit="true">
+      :form-fields="formFields" :form-rules="rules" form-width="640px" action-width="220" :detail-before-edit="true"
+      @after-save="onAfterSave">
       <template #column-userType="{ value }">{{ UTYPE[value] || value }}</template>
       <template #column-status="{ value }">
         <el-tag :type="value === 1 ? 'success' : 'info'">{{ value === 1 ? '启用' : '禁用' }}</el-tag>
@@ -105,10 +106,26 @@ const rules = {
 
 // 编辑前拉详情带出 roleIds 的逻辑已内建到 CrudTable（:detail-before-edit + crud.editRow）：
 // /page 不返回 roleIds，直接用列表行会让角色选择器空白、保存又以空值覆盖 → 静默清角色。
+// 新增账号时后端生成一次性初始口令并只在这一次响应里返回，不落任何页面——必须当场提示
+async function onAfterSave(form, res, editing) {
+  if (editing || !res?.initPassword) return
+  await ElMessageBox.alert(
+    `账号：${res.username}\n初始密码：${res.initPassword}\n请立即转交本人，此密码只显示这一次。`,
+    '新增成功',
+    { type: 'success', confirmButtonText: '我已抄下' }
+  )
+}
+
+// 重置口令由后端生成一次性随机串，只在本次响应里回显一次——弹窗关掉就再也查不到，
+// 所以用 alert 而不是 message，逼管理员把它抄走
 async function onReset(row) {
-  await ElMessageBox.confirm(`将 ${row.username} 的密码重置为 123456？`, '提示', { type: 'warning' })
-  await userRoleApi.resetPwd(row.id)
-  ElMessage.success('已重置为 123456')
+  await ElMessageBox.confirm(`重置 ${row.username} 的密码？将生成一次性随机密码。`, '提示', { type: 'warning' })
+  const d = (await userRoleApi.resetPwd(row.id)) || {}
+  await ElMessageBox.alert(
+    `新密码：${d.password || '(未返回)'}\n请立即转交本人，此密码只显示这一次。`,
+    '重置成功',
+    { type: 'success', confirmButtonText: '我已抄下' }
+  )
 }
 
 // ---- 分配数据（区域 orgId + 项目权限）----

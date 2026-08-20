@@ -133,6 +133,7 @@ import { ref, reactive, computed, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Download, Upload, View, CircleClose } from '@element-plus/icons-vue'
 import { projectApi, agencyApi } from '../../api/system'
+import { downloadFile } from '../../utils/download'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
@@ -260,9 +261,10 @@ async function doRemove(idx) {
   form.files.splice(idx, 1)
 }
 
-function doDownload(row) { window.open(row.fileUrl, '_blank') }
+// 附件已改为需登录下载：window.open 开的新窗口不会带 Authorization 头，只能走 axios 取 blob
+function doDownload(row) { return downloadFile(row.fileUrl, row.fileName) }
 function previewable(row) { return PREVIEWABLE.test(row.fileName || '') }
-function doPreview(row) { window.open(row.fileUrl, '_blank') }
+function doPreview(row) { return downloadFile(row.fileUrl, row.fileName) }
 
 function sizeText(n) {
   const v = Number(n)

@@ -34,17 +34,20 @@ V32__<...>.sql
 
 ## 执行（部署流水线手动，应用启动不自动迁移）
 
-随 fat jar 执行，Web 关掉不占端口：
+随 fat jar 执行，端口设 0（随机端口，不占 8080）：
+
+> 不要用 `--spring.main.web-application-type=none`：`AuthCoverageCheck` 依赖
+> `RequestMappingHandlerMapping`，非 Web 上下文里那个 bean 不存在，启动直接失败。
 
 ```bash
-java -jar target/ykt-backend-1.0.0.jar --ykt.migrate=true --spring.main.web-application-type=none
+java -jar target/ykt-backend-1.0.0.jar --ykt.migrate=true --server.port=0
 ```
 
 生产覆盖连接（与应用同一套环境变量）：
 
 ```bash
 YKT_DB_URL=jdbc:oracle:thin:@<host>:1521/<svc> YKT_DB_USER=<u> YKT_DB_PWD=<p> \
-  java -jar ykt-backend-1.0.0.jar --ykt.migrate=true --spring.main.web-application-type=none
+  java -jar ykt-backend-1.0.0.jar --ykt.migrate=true --server.port=0
 ```
 
 退出码 `0`=成功（含"已最新"），`1`=失败并已中止。

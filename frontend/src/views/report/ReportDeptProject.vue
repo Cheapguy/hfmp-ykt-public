@@ -76,6 +76,7 @@ import { ref, reactive, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Search, Download } from '@element-plus/icons-vue'
 import { reportApi, projectApi, queryApi, orgApi, agencyApi } from '../../api/system'
+import { csvCell } from '../../utils/csv'
 
 const projects = ref([]); const batches = ref([]); const towns = ref([]); const agencyUnits = ref([])
 const q = reactive({ projectId: null, batchId: null, competentDept: null, townId: null })
@@ -115,7 +116,7 @@ function doExport() {
   const proj = r => r.rowType === 'PROJECT_SUBTOTAL' ? '项目小计' : r.rowType === 'DETAIL' ? r.projectName : ''
   const head = ['部门名称', '项目名称', '批次名称', '补贴发放金额', '兑付人次', '发放时间']
   const lines = rows.value.map(r => [label(r), proj(r), r.rowType === 'DETAIL' ? r.batchName : '', r.grantAmount, r.grantCount, r.rowType === 'DETAIL' ? r.grantDate : '']
-    .map(v => `"${v == null ? '' : String(v).replace(/"/g, '""')}"`).join(','))
+    .map(csvCell).join(','))
   const csv = '﻿' + [head.join(','), ...lines].join('\r\n')
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
   const url = URL.createObjectURL(blob); const a = document.createElement('a')

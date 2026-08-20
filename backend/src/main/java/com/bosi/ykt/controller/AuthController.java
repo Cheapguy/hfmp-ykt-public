@@ -152,13 +152,14 @@ public class AuthController {
         return R.ok(filtered);
     }
 
-    /** bcrypt 串($2 开头)走 BCrypt 校验，否则按明文比对（脚手架种子用明文） */
+    /**
+     * 只认 bcrypt。非 {@code $2} 开头的 stored 值一律判失败——曾经的明文兜底分支意味着
+     * 库里可以躺着可直读的口令，且拖库即等于拿到全部账号。存量已由
+     * {@link com.bosi.ykt.security.PasswordUpgradeRunner} 启动时刷成 bcrypt。
+     */
     private boolean passwordMatches(String raw, String stored) {
-        if (raw == null || stored == null) return false;
-        if (stored.startsWith("$2")) {
-            try { return BCrypt.checkpw(raw, stored); } catch (Exception e) { return false; }
-        }
-        return raw.equals(stored);
+        if (raw == null || stored == null || !stored.startsWith("$2")) return false;
+        try { return BCrypt.checkpw(raw, stored); } catch (Exception e) { return false; }
     }
 
     @PostMapping("/logout")

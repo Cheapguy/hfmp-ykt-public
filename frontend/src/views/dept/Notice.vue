@@ -16,7 +16,9 @@
         <el-table-column type="index" label="序号" width="70" align="center" />
         <el-table-column prop="fileName" label="公告" min-width="360" show-overflow-tooltip>
           <template #default="{ row }">
-            <a v-if="row.fileUrl" :href="row.fileUrl" target="_blank" class="file-link">{{ row.fileName || row.title }}</a>
+            <!-- 附件已改为需登录下载：a[href] 直链不带 Authorization 头，改走 axios 取 blob -->
+            <a v-if="row.fileUrl" href="javascript:void(0)" class="file-link"
+               @click="downloadFile(row.fileUrl, row.fileName)">{{ row.fileName || row.title }}</a>
             <span v-else>{{ row.fileName || row.title }}</span>
           </template>
         </el-table-column>
@@ -78,6 +80,7 @@ import { ref, reactive, onMounted, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Upload, Delete, Promotion, UploadFilled } from '@element-plus/icons-vue'
 import { noticeApi } from '../../api/system'
+import { downloadFile } from '../../utils/download'
 
 // ---- 列表 ----
 const tblRef = ref(null)

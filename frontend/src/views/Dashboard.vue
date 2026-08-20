@@ -62,6 +62,9 @@ const userType = String(user.userType || '')
 // 走静默请求，失败由面板自己标 error 显示「加载失败·点击重试」——不能默默留空，
 // 否则和「真的没活干」看着一样，出问题没人发现。
 const SILENT = { silent: true }
+// 403 = 这个岗位本来就不该有这块待办，属于正常情况，面板直接隐藏；
+// 只有真出错（网络/500）才标红「加载失败」，否则换个角色登进来首页糊一片红字。
+const isForbidden = (e) => e?.code === 403 || e?.response?.status === 403
 
 // —— 待办面板工厂：各自带 items/loading + 独立数据源 ——
 // 待更正：退回/支付失败明细，按批次去重
@@ -82,7 +85,7 @@ function correctionPanel() {
           out.push({ id: d.batchCode, batchName: d.batchName || d.batchCode, tag: '更正', projectId: d.projectId })
         }
         this.items = out
-      } catch { this.items = []; this.error = true } finally { this.loading = false }
+      } catch (e) { this.items = []; this.error = !isForbidden(e) } finally { this.loading = false }
     }
   })
 }
@@ -101,7 +104,7 @@ function auditPanel() {
           id: b.id, batchName: b.batchName || b.batchCode, tag: b.status || '待审核',
           projectId: b.projectId, batchCode: b.batchCode
         }))
-      } catch { this.items = []; this.error = true } finally { this.loading = false }
+      } catch (e) { this.items = []; this.error = !isForbidden(e) } finally { this.loading = false }
     }
   })
 }
@@ -115,7 +118,7 @@ function rosterPanel() {
     async load() {
       this.loading = true; this.error = false
       try { this.items = (await rosterEditApi.pending(undefined, SILENT)) || [] }
-      catch { this.items = []; this.error = true } finally { this.loading = false }
+      catch (e) { this.items = []; this.error = !isForbidden(e) } finally { this.loading = false }
     }
   })
 }
@@ -133,7 +136,7 @@ function referPanel() {
         this.items = ((await referReqApi.pending(SILENT)) || []).map(r => ({
           id: r.id, batchName: `${r.name || ''}（${r.idCard || ''}）`, tag: '待审核'
         }))
-      } catch { this.items = []; this.error = true } finally { this.loading = false }
+      } catch (e) { this.items = []; this.error = !isForbidden(e) } finally { this.loading = false }
     }
   })
 }
@@ -151,7 +154,7 @@ function referIncludePanel() {
         this.items = ((await referReqApi.mine(SILENT)) || [])
           .filter(r => r.status === 'APPROVED')
           .map(r => ({ id: r.id, batchName: `${r.name || ''}（${r.idCard || ''}）`, tag: '已通过' }))
-      } catch { this.items = []; this.error = true } finally { this.loading = false }
+      } catch (e) { this.items = []; this.error = !isForbidden(e) } finally { this.loading = false }
     }
   })
 }
@@ -169,7 +172,7 @@ function payPendingPanel() {
         this.items = ((await paymentApi.pending(undefined, SILENT)) || []).map(b => ({
           id: b.id, batchName: b.batchName || b.batchCode, tag: '待支付', projectId: b.projectId
         }))
-      } catch { this.items = []; this.error = true } finally { this.loading = false }
+      } catch (e) { this.items = []; this.error = !isForbidden(e) } finally { this.loading = false }
     }
   })
 }
@@ -185,7 +188,7 @@ function paySubmitPanel() {
         this.items = ((await paymentApi.submitList('PENDING_SUBMIT', SILENT)) || []).map(a => ({
           id: a.id, batchName: a.batchName || a.applyNo, tag: '待送审'
         }))
-      } catch { this.items = []; this.error = true } finally { this.loading = false }
+      } catch (e) { this.items = []; this.error = !isForbidden(e) } finally { this.loading = false }
     }
   })
 }
@@ -201,7 +204,7 @@ function payMarkPanel() {
         this.items = ((await paymentApi.submitList('SUBMITTED', SILENT)) || []).map(a => ({
           id: a.id, batchName: a.batchName || a.applyNo, tag: '待代发'
         }))
-      } catch { this.items = []; this.error = true } finally { this.loading = false }
+      } catch (e) { this.items = []; this.error = !isForbidden(e) } finally { this.loading = false }
     }
   })
 }

@@ -35,8 +35,12 @@ public class JwtUtil {
 
     /**
      * 启动即校验密钥强度：占位符/空/过短(HS256 需 ≥32 字节)时——
-     *  - 生产 profile(prod)：直接拒绝启动（否则可凭已知占位符伪造管理员 token）；
-     *  - 非生产：放行但打醒目 WARN。
+     *  - 显式 dev profile：放行但打醒目 WARN（本地起服务不必配环境变量）；
+     *  - 其余一律拒绝启动（含不带 profile 的默认启动）。
+     *
+     * <p>此前的判据是「只有 prod 才拒」，但部署脚本漏写 {@code --spring.profiles.active=prod}
+     * 是最常见的事故形态，等于生产照样跑在公开占位符上——占位符是仓库里的明文，
+     * 谁都能拿它签一个 uid=1 的 token 当管理员。默认安全的判据必须反过来：不是显式开发就拒。
      */
     @PostConstruct
     void validateSecret() {
@@ -44,11 +48,12 @@ public class JwtUtil {
                 || secret.equals(PLACEHOLDER)
                 || secret.getBytes(StandardCharsets.UTF_8).length < 32;
         if (!weak) return;
-        boolean prod = false;
-        for (String p : env.getActiveProfiles()) if ("prod".equalsIgnoreCase(p)) prod = true;
-        if (prod) throw new IllegalStateException(
-                "生产环境 YKT_JWT_SECRET 未配置或过弱（须 ≥32 字节且非占位符），拒绝启动");
-        log.warn("[安全] JWT 密钥为占位/弱值，仅限开发；生产部署前必须设置强随机 YKT_JWT_SECRET");
+        boolean dev = false;
+        for (String p : env.getActiveProfiles()) if ("dev".equalsIgnoreCase(p)) dev = true;
+        if (!dev) throw new IllegalStateException(
+                "JWT 密钥未配置或过弱（须 ≥32 字节且非占位符），拒绝启动。"
+                + "请设置环境变量 YKT_JWT_SECRET；本地开发可加 --spring.profiles.active=dev 放行");
+        log.warn("[安全] JWT 密钥为占位/弱值，仅限 dev；生产部署前必须设置强随机 YKT_JWT_SECRET");
     }
 
     private SecretKey key() {

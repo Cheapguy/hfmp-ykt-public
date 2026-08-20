@@ -14,6 +14,7 @@ import com.bosi.ykt.entity.*;
 import com.bosi.ykt.mapper.*;
 import com.bosi.ykt.security.UserContext;
 import lombok.RequiredArgsConstructor;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -24,6 +25,12 @@ import java.util.*;
 /**
  * 编制花名册（系统管理 → 待编制花名册）。对生产「编制花名册」界面。
  * 数据落在 YKT_GRANT_DETAIL；批次状态：NEW 待编制 / SUBMITTED 已送审 / STOP 已停发。
+ *
+ * <p><b>写接口一律 {@code @Transactional(rollbackFor = Exception.class)}</b>：本类的写操作
+ * 几乎都是「循环逐条写 + 末尾刷批次合计」的形态，没有事务时中途抛异常（越权断言、状态机守卫、
+ * 某一行数据不合法）会留下半截数据——插了一半的人、改了一半的金额，而 BATCH 上的
+ * PLAN_AMOUNT/PERSON_COUNT 停在刷新之前的旧值，页面看到的人数和金额从此对不上库。
+ * 花名册是资金清册，这种半截状态没法靠重试自愈，必须整单回滚。
  */
 @RestController
 @RequestMapping("/dept/roster")
@@ -336,6 +343,7 @@ public class YktRosterEditController {
 
     /** 批量填报-保存：勾选的候选+补贴金额 写入批次 */
     @PostMapping("/fill-save")
+    @Transactional(rollbackFor = Exception.class)
     @SuppressWarnings("unchecked")
     public R<Integer> fillSave(@RequestBody Map<String, Object> body) {
         Long batchId = Long.valueOf(String.valueOf(body.get("batchId")));
@@ -415,6 +423,7 @@ public class YktRosterEditController {
 
     /** 新增/修改一条（更正批次只允许修改，不允许新增） */
     @PostMapping
+    @Transactional(rollbackFor = Exception.class)
     public R<Void> save(@RequestBody YktGrantDetail d) {
         checkIdCards(d);
         if (d.getId() == null) {
@@ -424,7 +433,16 @@ public class YktRosterEditController {
             d.setSortNo(nextSortNo(d.getBatchId()));
             YktBatch b = batchMapper.selectById(d.getBatchId());
             if (b != null) d.setBatchCode(b.getBatchCode());
-            if (d.getPayStatus() == null) d.setPayStatus("已申请");
+            // 新增行的支付状态一律「已申请」，不看请求体：原先只在 null 时兜底，
+            // 直连 POST {"payStatus":"已停发"} 能插一条从一开始就不参与打款的行，
+            // 送审校验也不查它——清册上有人，钱没发出去，谁也看不出来。
+            // 「已支付」同理，能凭空造出一条从未走过支付流程的已支付记录。
+            d.setPayStatus("已申请");
+            d.setStopReason(null);
+            d.setFailReason(null);
+            d.setRetryTimes(null);   // 发放次数只由更正重构维护
+            d.setSourceDetailId(null);
+            d.setSourceAmount(null); // 同上：更正溯源两列只由重构写入
             grantMapper.insert(d);
         } else {
             assertDetailScope(d.getId());
@@ -437,6 +455,7 @@ public class YktRosterEditController {
 
     /** 批量修改（逐条 updateById） */
     @PostMapping("/batch-save")
+    @Transactional(rollbackFor = Exception.class)
     public R<Integer> batchSave(@RequestBody List<YktGrantDetail> list) {
         int n = 0;
         for (YktGrantDetail d : list) if (d.getId() != null) {
@@ -459,6 +478,17 @@ public class YktRosterEditController {
     private void sanitizeDetailUpdate(YktGrantDetail d) {
         d.setBatchId(null);
         d.setBatchCode(null);
+        // ③ 清支付状态相关字段 —— 这几列归状态机所有，只能由 /stop-details、支付接口和更正重构改。
+        //    留给编辑接口意味着乡镇经办能把一条已停发的行改回「已申请」（悄悄恢复发放），
+        //    或者把在途行标成「已支付」让它从待办和更正列表里同时消失。MP 忽略 null，清掉即不参与更新。
+        d.setPayStatus(null);
+        d.setStopReason(null);
+        d.setFailReason(null);
+        d.setRetryTimes(null);
+        // ④ 清更正溯源两列 —— sourceAmount 是送审时的金额上限，允许请求体改它等于让客户端
+        //    自己设自己的天花板，那道校验就白做了。这两列只由更正重构写入。
+        d.setSourceDetailId(null);
+        d.setSourceAmount(null);
         YktGrantDetail old = grantMapper.selectById(d.getId());
         if (old == null) return;
         if (Integer.valueOf(1).equals(correctionFlagOf(old.getBatchId()))) {
@@ -482,6 +512,7 @@ public class YktRosterEditController {
 
     /** 删除选中明细（更正批次不可删人：人员集合固定，少一个人退回的钱就发不出去） */
     @DeleteMapping
+    @Transactional(rollbackFor = Exception.class)
     public R<Void> delete(@RequestParam String ids) {
         List<Long> idList = new ArrayList<>();
         for (String s : ids.split(",")) if (!s.isBlank()) idList.add(Long.valueOf(s.trim()));
@@ -493,6 +524,7 @@ public class YktRosterEditController {
 
     /** 批量填报：从补贴对象库按 乡镇/村组 拉人进花名册 */
     @PostMapping("/batch-fill")
+    @Transactional(rollbackFor = Exception.class)
     public R<Integer> batchFill(@RequestBody Map<String, Object> body) {
         Long batchId = Long.valueOf(String.valueOf(body.get("batchId")));
         Long townId = body.get("townId") == null ? null : Long.valueOf(String.valueOf(body.get("townId")));
@@ -583,6 +615,7 @@ public class YktRosterEditController {
      * 校验不过时返回 {ok:false, errors:[...]} 给前端「信息校验日志」弹窗展示，批次状态不动。
      */
     @PostMapping("/{batchId}/submit")
+    @Transactional(rollbackFor = Exception.class)
     public R<Map<String, Object>> submit(@PathVariable Long batchId) {
         assertScope(batchId);
         List<String> errs = validateForSubmit(batchId);
@@ -666,6 +699,23 @@ public class YktRosterEditController {
             }
             if (nz(d.getGroupName()).isEmpty())
                 errs.add(head + "村(居)民小组为空，请核对！");
+            // 金额/账号的自身合法性。下面那套「与补贴对象基础库比对」只回答「一不一致」，
+            // 回答不了「金额是不是 0」——而且两边银行账号都为空时 same() 恰好判为一致，
+            // 一条没有卡号的记录就这么一路走到打款环节。已停发行不参与打款，不校验金额。
+            if (!"已停发".equals(nz(d.getPayStatus()))) {
+                java.math.BigDecimal amt = d.getAmount();
+                if (amt == null || amt.signum() <= 0)
+                    errs.add(head + "发放金额必须大于 0，请核对！");
+                else if (amt.stripTrailingZeros().scale() > 2)
+                    errs.add(head + "发放金额最多两位小数，请核对！");
+                if (nz(d.getBankAccount()).isEmpty())
+                    errs.add(head + "银行账号为空，请核对！");
+                // 更正批次封顶：不得超过当初失败的那一笔。sourceAmount 由更正重构写入，
+                // 老数据（迁移前重构的行）为 null，不参与校验，避免把在途批次卡死。
+                if (amt != null && d.getSourceAmount() != null && amt.compareTo(d.getSourceAmount()) > 0)
+                    errs.add(head + "更正金额 " + amt.toPlainString()
+                            + " 超过原失败金额 " + d.getSourceAmount().toPlainString() + "，请核对！");
+            }
             YktBeneficiary p = idc.isEmpty() ? null : lib.get(idc);
             if (p == null) {
                 // 库里查无此人：户主/收款账户自然也对不上，按生产口径三条一起报
@@ -727,6 +777,7 @@ public class YktRosterEditController {
      * 停发明细不发起支付（不占额度），批次发送银行后归「退款」。清册整体仍可编辑。
      */
     @PostMapping("/stop-details")
+    @Transactional(rollbackFor = Exception.class)
     public R<?> stopDetails(@RequestBody StopReq req) {
         if (req == null || req.getDetailIds() == null || req.getDetailIds().isEmpty())
             throw new BizException("请选择要停发的明细");
@@ -748,6 +799,34 @@ public class YktRosterEditController {
     }
 
     /**
+     * 取消停发（明细级）：把「已停发」改回「已申请」，重新参与本批次发放。
+     *
+     * <p>停发原本是单向门：停了就只能等银行环节归退款、再走更正发放重新发一遍——
+     * 编制阶段点错一下也得绕一大圈。这里给编制阶段（NEW/ISSUED，即清册还可编辑时）
+     * 补上回头路；已送审或已进支付的批次仍然不许动，那时金额已被审核/冻结引用。
+     */
+    @PostMapping("/resume-details")
+    @Transactional(rollbackFor = Exception.class)
+    public R<?> resumeDetails(@RequestBody StopReq req) {
+        if (req == null || req.getDetailIds() == null || req.getDetailIds().isEmpty())
+            throw new BizException("请选择要取消停发的明细");
+        int n = 0;
+        for (Long id : req.getDetailIds()) {
+            YktGrantDetail d = grantMapper.selectById(id);
+            if (d == null) continue;
+            assertScope(d.getBatchId());
+            requireEditable(d.getBatchId());   // 只有清册可编辑阶段能回退
+            if (!"已停发".equals(d.getPayStatus())) continue;
+            // 条件更新：并发下只有一个请求能把这条从「已停发」翻回来
+            n += grantMapper.update(null, new com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper<YktGrantDetail>()
+                    .eq("ID", id).eq("PAY_STATUS", "已停发")
+                    .set("PAY_STATUS", "已申请").set("STOP_REASON", null));
+        }
+        if (n == 0) throw new BizException("选中明细中没有可取消停发的记录");
+        return R.ok(Map.of("count", n));
+    }
+
+    /**
      * 停发守卫：批次进入支付环节(PAID/PAID_OUT)后不可再停发——
      * 支付申请金额在 gen 时已按「排除已停发」冻结，之后再停发会让指标核算与实际错位。
      */
@@ -760,6 +839,7 @@ public class YktRosterEditController {
 
     /** 删除批次（连同花名册）；仅未下达/已下达批次可删；更正发放批次由系统重构生成，禁止删除 */
     @DeleteMapping("/batch/{batchId}")
+    @Transactional(rollbackFor = Exception.class)
     public R<Void> deleteBatch(@PathVariable Long batchId) {
         assertScope(batchId);
         YktBatch b = batchMapper.selectById(batchId);
@@ -848,6 +928,7 @@ public class YktRosterEditController {
      * 人员信息与补贴对象库的一致性仍留在送审阶段校验。
      */
     @PostMapping("/import")
+    @Transactional(rollbackFor = Exception.class)
     public R<Map<String, Object>> importExcel(@RequestParam Long batchId, @RequestParam("file") MultipartFile file) throws Exception {
         assertScope(batchId);
         requireEditable(batchId);

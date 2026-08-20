@@ -13,6 +13,7 @@
       <el-button @click="doExport">导出</el-button>
       <el-button :disabled="isCorrection || locked" @click="doDeleteBatch">删除批次</el-button>
       <el-button :disabled="locked" @click="doStop">停发</el-button>
+      <el-button :disabled="locked" @click="doResume">取消停发</el-button>
       <el-button @click="openSummary">发放金额合计及批次备注信息查看</el-button>
       <input ref="fileInput" type="file" accept=".xlsx,.xls" style="display:none" @change="onFileChange" />
     </el-card>
@@ -584,6 +585,14 @@ async function doStop() {
       inputValidator: v => (v && v.trim()) ? true : '停发原因不能为空' })
   const res = await rosterEditApi.stopDetails(selected.value.map(r => String(r.id)), reason.trim())
   ElMessage.success(`已停发 ${res?.count ?? selected.value.length} 人`); clearSel(); reload()
+}
+// 取消停发：只在清册可编辑阶段有效，后端会挡住已送审/已支付的批次
+async function doResume() {
+  if (!needSelected()) return
+  await ElMessageBox.confirm(
+    `将选中的 ${selected.value.length} 条明细取消停发、恢复参与本批次发放？`, '取消停发', { type: 'warning' })
+  const res = await rosterEditApi.resumeDetails(selected.value.map(r => String(r.id)))
+  ElMessage.success(`已恢复 ${res?.count ?? 0} 人`); clearSel(); reload()
 }
 async function doDeleteBatch() {
   if (!needBatch()) return

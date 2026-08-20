@@ -202,6 +202,7 @@ export const rosterEditApi = {
   submit:     (batchId) => request.post(`/dept/roster/${batchId}/submit`),
   unsubmit:   (batchId) => request.post(`/dept/roster/${batchId}/unsubmit`),
   stopDetails:(detailIds, reason) => request.post('/dept/roster/stop-details', { detailIds, reason }),
+  resumeDetails:(detailIds) => request.post('/dept/roster/resume-details', { detailIds }),
   deleteBatch:(batchId) => request.delete(`/dept/roster/batch/${batchId}`),
   summary:    (batchId) => request.get(`/dept/roster/${batchId}/summary`),
   importExcel:(batchId, formData) => request.post('/dept/roster/import', formData, { params: { batchId }, headers: { 'Content-Type': 'multipart/form-data' } }),

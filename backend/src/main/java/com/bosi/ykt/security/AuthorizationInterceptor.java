@@ -56,7 +56,10 @@ public class AuthorizationInterceptor implements HandlerInterceptor {
             // ===== 系统设置 =====
             Map.entry("/setup/bank",        new Rule(201, true)),
             Map.entry("/setup/village",     new Rule(202, true)),
-            Map.entry("/setup/beneficiary", new Rule(203, true)),
+            // 补贴对象是 PII 本体（身份证/银行卡/电话）：读也必须要菜单 203。
+            // 它不是各页共用的字典，只有补贴对象维护页在调；开放读 = 同县任意登录账号
+            // 都能翻页 dump 全县身份证和卡号，县域隔离拦不住这种「本县内的越权」。
+            Map.entry("/setup/beneficiary", new Rule(203, false)),
             // 引用请求审批流：读写都须补贴对象维护菜单 203（不能像 /sys/org 那样 writeOnly——
             // 它不是各页共用的字典，GET 返回身份证号，只被补贴对象维护页和乡镇工作台调用，开放读等于白给一个身份证读取口）
             Map.entry("/setup/refer-request", new Rule(203, false)),
@@ -72,9 +75,10 @@ public class AuthorizationInterceptor implements HandlerInterceptor {
             // 发放表定义：写操作须菜单 311（此前漏登记——启动自检 AuthCoverageCheck 就是防这种盲区的）
             Map.entry("/dept/tpl",          new Rule(311, true)),
             // ===== 花名册 =====
-            Map.entry("/roster",            new Rule(401, true)),
-            // 编制花名册写接口：挂隐藏菜单 403(/roster/edit, VISIBLE=0)，migrate_21 授 role 2/7
-            Map.entry("/dept/roster",       new Rule(403, true)),
+            // 花名册两条路径同样直出身份证/卡号，同上：GET 也要菜单，不做 writeOnly
+            Map.entry("/roster",            new Rule(401, false)),
+            // 编制花名册：挂隐藏菜单 403(/roster/edit, VISIBLE=0)，migrate_21 授 role 2/7
+            Map.entry("/dept/roster",       new Rule(403, false)),
             // ===== 集中支付 =====
             Map.entry("/pay/quota",         new Rule(501, true)),
             Map.entry("/pay/apply",         new Rule(502, true))
@@ -104,12 +108,17 @@ public class AuthorizationInterceptor implements HandlerInterceptor {
         // 非控制器处理器（静态资源 / 404 转发等）无 @RequestMapping，非我方 API，放行
         if (!(handler instanceof HandlerMethod hm)) return true;
 
+        // 能走到这里的请求都过了 JwtInterceptor（无 token 直接 401），所以 uid 缺失只可能是
+        // 一个 uid claim 为空的合法签名 token——这不是「公共接口」，按未登录拒掉，不再无条件放行
         Long uid = UserContext.currentUserId();
-        if (uid == null) return true;
+        if (uid == null) throw new BizException(401, "未登录");
 
         SysUser u = userMapper.selectById(uid);
-        String ut = u == null ? null : u.getUserType();
-        if ("SYS_ADMIN".equals(ut)) return true;
+        if (u == null) throw new BizException(401, "用户不存在");
+        // 逐请求核对启用状态：JWT 是无状态的，禁用/删号在 token 过期前(默认 8h)不会自动失效
+        if (u.getStatus() != null && u.getStatus() == 0) throw new BizException(401, "账号已禁用");
+
+        if ("SYS_ADMIN".equals(u.getUserType())) return true;
 
         String base = controllerBasePath(hm);
         Rule rule = METHOD_RULES.get(base + "#" + hm.getMethod().getName());

@@ -39,6 +39,7 @@ public class YktAuditController {
     private final SysUserMapper userMapper;
     private final YktRosterMapper rosterMapper;
     private final YktBeneficiaryMapper beneficiaryMapper;
+    private final YktGrantDetailMapper grantDetailMapper;
     private final com.bosi.ykt.security.DataScopeResolver dataScope;
 
     /** 待审岗中文名（auditStage = 当前待审岗，对齐生产流程进度） */
@@ -293,13 +294,23 @@ public class YktAuditController {
     @GetMapping("/{id}/check-bank")
     public R<Map<String, Object>> checkBank(@PathVariable Long id) {
         assertScopeById(id);   // 县域隔离
-        List<YktRoster> rs = rosterMapper.selectList(new LambdaQueryWrapper<YktRoster>().eq(YktRoster::getBatchId, id));
+        // 校验对象是花名册明细 YKT_GRANT_DETAIL——审核页看的、送审的、最后要打钱的都是它。
+        // 原先查的是 YKT_ROSTER：那张表在现行流程里根本没有写入方（线上 0 行），于是这个按钮
+        // 永远返回「校验通过，共 0 人」，一个空账号也查不出来，等于从来没生效过。
+        // 账号/户名也直接取明细上的快照值，而不是回查补贴对象——打款用的就是明细里的这份。
+        List<YktGrantDetail> rs = grantDetailMapper.selectList(
+                new LambdaQueryWrapper<YktGrantDetail>()
+                        .eq(YktGrantDetail::getBatchId, id)
+                        .orderByAsc(YktGrantDetail::getSortNo));
         List<String> bad = new ArrayList<>();
-        for (YktRoster r : rs) {
-            if (r.getBeneficiaryId() == null) { bad.add(r.getName() + "：未关联补贴对象"); continue; }
-            YktBeneficiary ben = beneficiaryMapper.selectById(r.getBeneficiaryId());
-            if (ben == null || ben.getBankAccount() == null || ben.getBankAccount().isBlank()) {
-                bad.add(r.getName() + "：银行账号缺失");
+        for (YktGrantDetail d : rs) {
+            String who = d.getPayeeName() != null && !d.getPayeeName().isBlank()
+                    ? d.getPayeeName()
+                    : (d.getHolderName() == null || d.getHolderName().isBlank() ? "(无姓名)" : d.getHolderName());
+            if (d.getBankAccount() == null || d.getBankAccount().isBlank()) {
+                bad.add(who + "：银行账号缺失");
+            } else if (d.getBankName() == null || d.getBankName().isBlank()) {
+                bad.add(who + "：开户银行缺失");
             }
         }
         Map<String, Object> m = new LinkedHashMap<>();

@@ -67,6 +67,7 @@ import { ref, reactive, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Search, Download } from '@element-plus/icons-vue'
 import { reportApi, projectApi, queryApi, agencyApi } from '../../api/system'
+import { csvCell } from '../../utils/csv'
 
 const projects = ref([]); const batches = ref([])
 const agencyDepts = ref([])  // 部门名称下拉=机构子单位(level2,101001起)
@@ -114,7 +115,7 @@ function doExport() {
   if (!rows.value.length) { ElMessage.warning('无数据可导出'); return }
   const head = ['部门名称', '项目名称', '批次名称', '月份/年', '乡镇名称', '补贴申请金额', '申请享受人数', '补贴发放金额', '发放享受人数']
   const lines = rows.value.map(r => [r.competentDept, r.projectName, r.batchName, r.month, r.townName, r.applyAmount, r.applyCount, r.grantAmount, r.grantCount]
-    .map(v => `"${v == null ? '' : String(v).replace(/"/g, '""')}"`).join(','))
+    .map(csvCell).join(','))
   const csv = '﻿' + [head.join(','), ...lines].join('\r\n')
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
   const url = URL.createObjectURL(blob); const a = document.createElement('a')

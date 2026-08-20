@@ -69,6 +69,7 @@ import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Download, RefreshRight } from '@element-plus/icons-vue'
 import { correctionApi, projectApi, orgApi, queryApi } from '../../api/system'
+import { csvCell } from '../../utils/csv'
 
 const route = useRoute()
 
@@ -152,7 +153,7 @@ function doExport() {
   if (!rows.value.length) { ElMessage.warning('无数据可导出'); return }
   const head = ['姓名', '银行卡号', '发放批次', '所在乡镇', '村组', '申请金额', '状态', '失败原因', '发放次数', '备注']
   const lines = rows.value.map(r => [r.beneficiaryName, r.bankAccount, r.batchName, r.townName, r.villageName, r.amount, r.payStatus, r.failReason, `第${(r.retryTimes || 0) + 1}次`, r.remark]
-    .map(v => `"${v == null ? '' : String(v).replace(/"/g, '""')}"`).join(','))
+    .map(csvCell).join(','))
   const csv = '﻿' + [head.join(','), ...lines].join('\r\n')
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
   const url = URL.createObjectURL(blob)

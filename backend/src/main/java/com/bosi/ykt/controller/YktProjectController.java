@@ -351,9 +351,38 @@ public class YktProjectController extends BaseCrudController<YktProjectMapper, Y
             } else {
                 throw new BizException("项目[" + p.getProjectName() + "]当前阶段无法审核");
             }
-            mapper.updateById(p);
+            updateRetryingOnCodeClash(p);
         }
         return R.ok();
+    }
+
+    /**
+     * 保存项目；项目编码撞唯一索引(UX_PROJECT_CODE)时重算重试。
+     *
+     * <p>{@link #genProjectCode} 是「查本县 MAX 再 +1」，两个终审并发会读到同一个 MAX、
+     * 发出同一个编码。编码既是对外业务主键、又是县域可见性的判据（'9'+县码 前缀），
+     * 撞号事后极难发现。V46 的唯一索引把它变成一次可捕获的写失败，这里接住重算——
+     * Oracle 对失败语句做语句级回滚，事务本身仍可用，所以能在同一事务内直接重试。
+     */
+    private void updateRetryingOnCodeClash(YktProject p) {
+        for (int attempt = 0; ; attempt++) {
+            try {
+                mapper.updateById(p);
+                return;
+            } catch (org.springframework.dao.DataIntegrityViolationException e) {
+                // 接父类 DataIntegrityViolationException 而不是子类 DuplicateKeyException：
+                // ORA-00001 经 Spring 翻译通常落在 DuplicateKeyException，但翻译链走 SQLState/
+                // 子类分支时会停在父类上。这里关心的只是「唯一约束把这次写挡了」，接父类才不会漏——
+                // 漏了的后果不是撞号（索引仍挡得住），而是整单 500、前端看不到「请重试」。
+                String prev = p.getProjectCode();
+                if (prev == null) throw e;                      // 压根没编码，不是编码撞的
+                String next = genProjectCode(p.getCreateBy());
+                if (next.equals(prev)) throw e;                 // 重算没变=另有约束被违反，原样上抛别吞
+                if (attempt >= 4)
+                    throw new BizException("项目[" + p.getProjectName() + "]编码生成冲突，请重试");
+                p.setProjectCode(next);
+            }
+        }
     }
 
     /** 追踪代码校验：空/空白视为不核定（终审时选填），非空则必须合规。 */
@@ -492,6 +521,7 @@ public class YktProjectController extends BaseCrudController<YktProjectMapper, Y
     /** 审核历史（流程进度） */
     @GetMapping("/{id}/history")
     public R<List<YktProjectAuditLog>> history(@PathVariable Long id) {
+        assertProjectVisible(id);   // 县域越权兜底：与 /{id}/files 同口径，此前漏了
         return R.ok(logMapper.selectList(new LambdaQueryWrapper<YktProjectAuditLog>()
                 .eq(YktProjectAuditLog::getProjectId, id).orderByAsc(YktProjectAuditLog::getSeqNo)));
     }
@@ -782,7 +812,7 @@ public class YktProjectController extends BaseCrudController<YktProjectMapper, Y
      * 终审后生成项目编码：县级项目 = '9'+创建者县码(6位)+5位序列（12 位），
      * 与县域可见性前缀规则(9+县码)一致——旧版 "962"+时间戳 生成的编码永远匹配不上任何县，
      * 会把县自建项目错判成省级公有全州可见。推不出县（州级/系统建）→ '969' 打头公有编码
-     * （'969' 不会撞任何 '9'+县码：县 orgCode 均为 6229xx）。
+     * （'969' 不会撞任何 '9'+县码：县 orgCode 均为 9900xx）。
      */
     private String genProjectCode(Long createBy) {
         String county = creatorCounty(createBy);

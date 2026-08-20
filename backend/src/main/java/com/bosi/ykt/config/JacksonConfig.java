@@ -3,6 +3,7 @@ package com.bosi.ykt.config;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.DeserializationContext;
 import com.fasterxml.jackson.databind.deser.std.StdDeserializer;
+import com.fasterxml.jackson.databind.exc.InvalidFormatException;
 import com.fasterxml.jackson.databind.ser.std.ToStringSerializer;
 import org.springframework.boot.autoconfigure.jackson.Jackson2ObjectMapperBuilderCustomizer;
 import org.springframework.context.annotation.Bean;
@@ -33,7 +34,11 @@ public class JacksonConfig {
             String s = p.getValueAsString();
             if (s == null || s.isBlank()) return null;
             try { return Long.parseLong(s.trim()); }
-            catch (NumberFormatException e) { return null; }
+            catch (NumberFormatException e) {
+                // 不能吞成 null：id 传成 "abc" 时静默变 null，updateById 更新 0 行却照样返回成功，
+                // 前端显示「保存成功」而库里什么都没变——这类假成功比直接报错难查得多。
+                throw new InvalidFormatException(p, "不是合法的数字：" + s, s, Long.class);
+            }
         }
     }
 }

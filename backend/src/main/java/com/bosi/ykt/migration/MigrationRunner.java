@@ -26,6 +26,10 @@ import java.sql.Connection;
  */
 @Slf4j
 @Component
+// 显式排在其它 ApplicationRunner 之前：表结构先就位，后面的数据类 runner
+// （如 PasswordUpgradeRunner）才有表可刷。原先不标 Order 等于 LOWEST_PRECEDENCE，
+// 反而跑在标了 Order 的 runner 后面。
+@org.springframework.core.annotation.Order(10)
 @RequiredArgsConstructor
 public class MigrationRunner implements ApplicationRunner {
 

@@ -282,10 +282,11 @@ async function handleSave() {
   await formRef.value.validate()
   saving.value = true
   try {
-    await props.api.save(formData.value)
+    const res = await props.api.save(formData.value)
     ElMessage.success(editing.value ? '更新成功' : '新增成功')
     formVisible.value = false
-    emit('after-save', formData.value)
+    // 带上后端返回体与新增/编辑标志：新增用户等场景要拿响应里的一次性初始口令
+    emit('after-save', formData.value, res, editing.value)
     loadData()
   } finally { saving.value = false }
 }

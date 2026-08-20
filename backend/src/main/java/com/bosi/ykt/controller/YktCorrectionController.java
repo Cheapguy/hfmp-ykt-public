@@ -2,6 +2,8 @@ package com.bosi.ykt.controller;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.bosi.ykt.common.BizException;
 import com.bosi.ykt.common.R;
 import com.bosi.ykt.entity.*;
@@ -54,8 +56,14 @@ public class YktCorrectionController {
         String code = batchCode == null ? null : batchCode.trim();
         if (code != null && !code.isEmpty()) w.like("BATCH_CODE", code);
         dataScope.applyBatchTown(w, "BATCH_ID");        // 县域隔离下推 SQL
-        w.last("AND ROWNUM <= 5000 ORDER BY BATCH_ID, SORT_NO");
-        List<YktGrantDetail> details = grantMapper.selectList(w);
+        w.orderByAsc("BATCH_ID", "SORT_NO");
+        // 封顶必须走分页器，不能拼 last("AND ROWNUM <= n ORDER BY ...")：
+        // Oracle 的 ROWNUM 在 ORDER BY **之前**求值，那种写法是「随便取 5000 行再排序」，
+        // 而不是「排序后取前 5000」——超限时列表里少的是哪些人完全不确定，
+        // 而这是一张要拿去重新发钱的名单。MP 的 Oracle 方言会正确嵌套成子查询后再截断。
+        Page<YktGrantDetail> page = new Page<>(1, 5000);
+        page.setSearchCount(false);                     // 只要前 N 条，不需要 count 全表
+        List<YktGrantDetail> details = grantMapper.selectPage(page, w).getRecords();
         if (details.isEmpty()) return R.ok(Collections.emptyList());
 
         Map<Long, YktBatch> batchCache = new HashMap<>();
@@ -141,6 +149,18 @@ public class YktCorrectionController {
 
             int sortNo = 1;
             for (YktGrantDetail s : e.getValue()) {
+                // 先抢占源明细再复制：条件更新只在它「仍处于可更正状态」时才生效。
+                // 原先是「插新明细 → updateById 改源状态」的读-改-写，两个并发 rebuild
+                // 会各自建一套更正批次、把同一批人重复复制，等于同一笔钱发两遍。
+                // r==0 说明已被别人抢走，直接抛错，@Transactional 把本次全部回滚。
+                int claimed = grantMapper.update(null, new UpdateWrapper<YktGrantDetail>()
+                        .eq("ID", s.getId())
+                        .in("PAY_STATUS", CORRECTABLE)
+                        .set("PAY_STATUS", "已重构")
+                        .set("REMARK", (s.getRemark() == null ? "" : s.getRemark() + "；") + "已重构至" + nb.getBatchCode()));
+                if (claimed == 0)
+                    throw new BizException("明细「" + s.getHolderName() + "」已被其他操作重构，请刷新后重试");
+
                 YktGrantDetail nd = new YktGrantDetail();
                 nd.setBatchId(nb.getId());
                 nd.setBatchCode(nb.getBatchCode());
@@ -163,15 +183,14 @@ public class YktCorrectionController {
                 nd.setAge(s.getAge());
                 nd.setStandard(s.getStandard());
                 nd.setAmount(s.getAmount());
+                // 留住「这行是从哪条失败明细来的、当时多少钱」：更正批次的金额可以在重新填报时改，
+                // 但改大等于凭空多发（失败的那笔钱已经退回可用额度，审核链看到的只是一个金额合理的新批次）。
+                // 送审校验拿 sourceAmount 当上限，见 YktRosterEditController.validateForSubmit。
+                nd.setSourceDetailId(s.getId());
+                nd.setSourceAmount(s.getAmount());
                 nd.setFillDate(LocalDate.now());
                 nd.setRelationship(s.getRelationship());
                 grantMapper.insert(nd);
-                // 源明细标记「已重构」，从待更正列表移除，避免重复重构
-                YktGrantDetail su = new YktGrantDetail();
-                su.setId(s.getId());
-                su.setPayStatus("已重构");
-                su.setRemark((s.getRemark() == null ? "" : s.getRemark() + "；") + "已重构至" + nb.getBatchCode());
-                grantMapper.updateById(su);
                 personCount++;
             }
             refreshBatchTotals(nb.getId());

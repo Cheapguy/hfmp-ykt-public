@@ -1,0 +1,27 @@
+-- 代码审核 #15：更正批次的金额可以改得比失败原额还高。
+-- 失败的那笔钱已经退回可用额度，更正批次照抄原金额后允许乡镇改大，改多少就多发多少，
+-- 而后续审核链看到的只是「一个金额合理的更正批次」，对不上原始失败额。
+-- 这里给花名册明细补两列，把「这行是从哪条失败明细来的、当时多少钱」落库，
+-- 送审时用 SOURCE_AMOUNT 做上限校验。
+-- 只对更正重构生成的行写值，普通批次两列为 NULL，不影响既有逻辑。
+DECLARE
+  n NUMBER;
+BEGIN
+  SELECT COUNT(*) INTO n FROM USER_TAB_COLS
+   WHERE TABLE_NAME = 'YKT_GRANT_DETAIL' AND COLUMN_NAME = 'SOURCE_DETAIL_ID';
+  IF n = 0 THEN
+    EXECUTE IMMEDIATE 'ALTER TABLE YKT_GRANT_DETAIL ADD (SOURCE_DETAIL_ID NUMBER(19))';
+  END IF;
+END;
+/
+
+DECLARE
+  n NUMBER;
+BEGIN
+  SELECT COUNT(*) INTO n FROM USER_TAB_COLS
+   WHERE TABLE_NAME = 'YKT_GRANT_DETAIL' AND COLUMN_NAME = 'SOURCE_AMOUNT';
+  IF n = 0 THEN
+    EXECUTE IMMEDIATE 'ALTER TABLE YKT_GRANT_DETAIL ADD (SOURCE_AMOUNT NUMBER(18,2))';
+  END IF;
+END;
+/

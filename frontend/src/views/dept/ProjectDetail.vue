@@ -99,6 +99,7 @@
 import { ref, watch } from 'vue'
 import { Download, View } from '@element-plus/icons-vue'
 import { projectApi } from '../../api/system'
+import { downloadFile } from '../../utils/download'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
@@ -126,7 +127,8 @@ watch(() => props.visible, async v => {
   } finally { loading.value = false }
 })
 
-function open(row) { window.open(row.fileUrl, '_blank') }
+// 附件已改为需登录下载：window.open 开的新窗口不会带 Authorization 头，只能走 axios 取 blob
+function open(row) { return downloadFile(row.fileUrl, row.fileName) }
 function previewable(row) { return PREVIEWABLE.test(row.fileName || '') }
 function sizeText(n) {
   const v = Number(n)
